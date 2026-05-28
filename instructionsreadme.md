@@ -2,9 +2,11 @@
 
 This fork includes Windows-focused defaults to make an Xbox controller (Xbox One / Series) behave like an **emulated Wii Remote** (plus Nunchuk) with minimal re-binding.
 
-## Easiest way (no commands): download a prebuilt zip
+## Easiest way (no commands): download the Windows build zip
 
-If this repo has a **Release** (recommended) or a recent **Actions build artifact**, you can download and run Dolphin without using any command line.
+Do **not** use the green **Code → Download ZIP** button. That downloads **source code**, not a ready-to-run app.
+
+Instead, download the prebuilt Windows zip from **Actions artifacts** (or Releases if one is posted).
 
 ### Option A: GitHub Releases (best)
 
@@ -18,12 +20,13 @@ If this repo has a **Release** (recommended) or a recent **Actions build artifac
 
 1. Open the repo on GitHub.
 2. Click the **Actions** tab.
-3. Open the latest successful run of the **Build Windows (Xbox-friendly)** workflow.
-4. Scroll to **Artifacts** and download the zip.
+3. In the left sidebar, click **Build Windows (Xbox-friendly)**.
+4. Open the latest successful run.
+5. Scroll to **Artifacts** and download `Dolphin-Xbox-friendly-Windows.zip`.
 5. Unzip it anywhere.
 6. Run `Dolphin.exe`.
 
-If you don’t see Releases or Actions artifacts, the maintainer hasn’t published a build yet — use the “Build it yourself” section below.
+If you don’t see the **Actions** tab or you don’t see any successful runs/artifacts yet, a build hasn’t been generated yet — use the “Build it yourself” section below.
 
 ## Build it yourself (Windows)
 
