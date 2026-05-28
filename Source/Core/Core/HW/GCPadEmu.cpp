@@ -4,6 +4,8 @@
 #include "Core/HW/GCPadEmu.h"
 
 #include <array>
+#include <optional>
+#include <string_view>
 
 #include "Common/Common.h"
 #include "Common/CommonTypes.h"
@@ -15,6 +17,7 @@
 #include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
 #include "InputCommon/ControllerEmu/ControlGroup/MixedTriggers.h"
 #include "InputCommon/ControllerEmu/StickGate.h"
+#include "InputCommon/ControllerInterface/CoreDevice.h"
 #include "InputCommon/GCPadStatus.h"
 
 static const u16 button_bitmasks[] = {
@@ -198,6 +201,93 @@ void GCPad::LoadDefaults(const ControllerInterface& ciface)
   // Triforce Coin
   m_triforce->SetControlExpression(2, "pulse(`Android/0/Device Sensors:Accel Down` > 15, 0.1)");
 #else
+  bool use_gamepad_defaults = false;
+
+  const auto set_default_gamepad_device_if_present = [&] {
+#ifdef _WIN32
+    // On Windows, the default device is intentionally the Keyboard/Mouse (highest sort priority).
+    // For typical users, a "default" pad config should prefer an actual gamepad device.
+    const auto devices = ciface.GetAllDevices();
+
+    const auto choose_device =
+        [&](std::string_view source) -> std::optional<ciface::Core::DeviceQualifier> {
+      for (const auto& device : devices)
+      {
+        if (!device || !device->IsValid())
+          continue;
+        if (device->IsVirtualDevice())
+          continue;
+        if (device->GetSource() != source)
+          continue;
+
+        ciface::Core::DeviceQualifier qualifier;
+        qualifier.FromDevice(device.get());
+        return qualifier;
+      }
+      return std::nullopt;
+    };
+
+    // Prefer SDL (works for Xbox pads and many others), then XInput, then DInput joystick.
+    if (auto qualifier = choose_device("SDL"))
+    {
+      SetDefaultDevice(std::move(*qualifier));
+      use_gamepad_defaults = true;
+    }
+    else if (auto qualifier = choose_device("XInput"))
+    {
+      SetDefaultDevice(std::move(*qualifier));
+      use_gamepad_defaults = true;
+    }
+    else if (auto qualifier = choose_device("DInput"))
+    {
+      SetDefaultDevice(std::move(*qualifier));
+      use_gamepad_defaults = true;
+    }
+#endif
+  };
+
+  set_default_gamepad_device_if_present();
+
+#ifdef _WIN32
+  if (use_gamepad_defaults)
+  {
+    // Buttons: A, B, X, Y, Z, Start
+    m_buttons->SetControlExpression(0, "`Button A`");      // A
+    m_buttons->SetControlExpression(1, "`Button B`");      // B
+    m_buttons->SetControlExpression(2, "`Button X`");      // X
+    m_buttons->SetControlExpression(3, "`Button Y`");      // Y
+    m_buttons->SetControlExpression(4, "`Shoulder R`");    // Z
+    m_buttons->SetControlExpression(5, "`Start`");         // Start
+
+    // D-Pad
+    m_dpad->SetControlExpression(0, "`Pad N`");  // Up
+    m_dpad->SetControlExpression(1, "`Pad S`");  // Down
+    m_dpad->SetControlExpression(2, "`Pad W`");  // Left
+    m_dpad->SetControlExpression(3, "`Pad E`");  // Right
+
+    // Control stick (left stick)
+    m_main_stick->SetControlExpression(0, "`Left Y-`");  // Up
+    m_main_stick->SetControlExpression(1, "`Left Y+`");  // Down
+    m_main_stick->SetControlExpression(2, "`Left X-`");  // Left
+    m_main_stick->SetControlExpression(3, "`Left X+`");  // Right
+    m_main_stick->SetControlExpression(4, "`Thumb L`");  // Modifier
+
+    // C stick (right stick)
+    m_c_stick->SetControlExpression(0, "`Right Y-`");  // Up
+    m_c_stick->SetControlExpression(1, "`Right Y+`");  // Down
+    m_c_stick->SetControlExpression(2, "`Right X-`");  // Left
+    m_c_stick->SetControlExpression(3, "`Right X+`");  // Right
+    m_c_stick->SetControlExpression(4, "`Thumb R`");   // Modifier
+
+    // Triggers
+    m_triggers->SetControlExpression(0, "`Trigger L`");  // L
+    m_triggers->SetControlExpression(1, "`Trigger R`");  // R
+
+    // Done (skip keyboard defaults).
+    return;
+  }
+#endif
+
   // Buttons: A, B, X, Y, Z
   m_buttons->SetControlExpression(0, "`X`");
   m_buttons->SetControlExpression(1, "`Z`");

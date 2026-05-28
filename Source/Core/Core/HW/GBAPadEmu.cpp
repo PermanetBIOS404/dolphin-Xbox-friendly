@@ -3,11 +3,15 @@
 
 #include "Core/HW/GBAPadEmu.h"
 
+#include <optional>
+#include <string_view>
+
 #include <fmt/format.h>
 
 #include "Core/HW/GBAPad.h"
 
 #include "InputCommon/ControllerEmu/ControlGroup/Buttons.h"
+#include "InputCommon/ControllerInterface/CoreDevice.h"
 #include "InputCommon/GCPadStatus.h"
 
 static const u16 dpad_bitmasks[] = {PAD_BUTTON_UP, PAD_BUTTON_DOWN, PAD_BUTTON_LEFT,
@@ -92,6 +96,68 @@ void GBAPad::LoadDefaults(const ControllerInterface& ciface)
   EmulatedController::LoadDefaults(ciface);
 
 #ifndef ANDROID
+#ifdef _WIN32
+  bool use_gamepad_defaults = false;
+
+  const auto set_default_gamepad_device_if_present = [&] {
+    const auto devices = ciface.GetAllDevices();
+
+    const auto choose_device =
+        [&](std::string_view source) -> std::optional<ciface::Core::DeviceQualifier> {
+      for (const auto& device : devices)
+      {
+        if (!device || !device->IsValid())
+          continue;
+        if (device->IsVirtualDevice())
+          continue;
+        if (device->GetSource() != source)
+          continue;
+
+        ciface::Core::DeviceQualifier qualifier;
+        qualifier.FromDevice(device.get());
+        return qualifier;
+      }
+      return std::nullopt;
+    };
+
+    if (auto qualifier = choose_device("SDL"))
+    {
+      SetDefaultDevice(std::move(*qualifier));
+      use_gamepad_defaults = true;
+    }
+    else if (auto qualifier = choose_device("XInput"))
+    {
+      SetDefaultDevice(std::move(*qualifier));
+      use_gamepad_defaults = true;
+    }
+    else if (auto qualifier = choose_device("DInput"))
+    {
+      SetDefaultDevice(std::move(*qualifier));
+      use_gamepad_defaults = true;
+    }
+  };
+
+  set_default_gamepad_device_if_present();
+
+  if (use_gamepad_defaults)
+  {
+    // Buttons
+    m_buttons->SetControlExpression(0, "`Button A`");     // B
+    m_buttons->SetControlExpression(1, "`Button B`");     // A
+    m_buttons->SetControlExpression(2, "`Shoulder L`");   // L
+    m_buttons->SetControlExpression(3, "`Shoulder R`");   // R
+    m_buttons->SetControlExpression(4, "`Back`");         // Select
+    m_buttons->SetControlExpression(5, "`Start`");        // Start
+
+    // D-Pad
+    m_dpad->SetControlExpression(0, "`Pad N`");  // Up
+    m_dpad->SetControlExpression(1, "`Pad S`");  // Down
+    m_dpad->SetControlExpression(2, "`Pad W`");  // Left
+    m_dpad->SetControlExpression(3, "`Pad E`");  // Right
+    return;
+  }
+#endif
+
   // Buttons
   m_buttons->SetControlExpression(0, "`Z`");  // B
   m_buttons->SetControlExpression(1, "`X`");  // A

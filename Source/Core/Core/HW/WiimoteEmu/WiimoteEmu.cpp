@@ -708,6 +708,89 @@ void Wiimote::LoadDefaults(const ControllerInterface& ciface)
   m_imu_gyroscope->SetControlExpression(4, "`Android/0/Device Sensors:Gyro Yaw Left`");
   m_imu_gyroscope->SetControlExpression(5, "`Android/0/Device Sensors:Gyro Yaw Right`");
 #else
+  bool use_gamepad_defaults = false;
+
+  const auto set_default_gamepad_device_if_present = [&] {
+#ifdef _WIN32
+    // On Windows, the default device is intentionally the Keyboard/Mouse (highest sort priority).
+    // For a "gamepad as Wiimote" setup, prefer an actual gamepad device if one is connected.
+    const auto devices = ciface.GetAllDevices();
+
+    const auto choose_device =
+        [&](std::string_view source) -> std::optional<ciface::Core::DeviceQualifier> {
+      for (const auto& device : devices)
+      {
+        if (!device || !device->IsValid())
+          continue;
+        if (device->IsVirtualDevice())
+          continue;
+        if (device->GetSource() != source)
+          continue;
+
+        ciface::Core::DeviceQualifier qualifier;
+        qualifier.FromDevice(device.get());
+        return qualifier;
+      }
+      return std::nullopt;
+    };
+
+    // Prefer SDL (works for Xbox pads and many others), then XInput, then DInput joystick.
+    if (auto qualifier = choose_device("SDL"))
+    {
+      SetDefaultDevice(std::move(*qualifier));
+      use_gamepad_defaults = true;
+    }
+    else if (auto qualifier = choose_device("XInput"))
+    {
+      SetDefaultDevice(std::move(*qualifier));
+      use_gamepad_defaults = true;
+    }
+    else if (auto qualifier = choose_device("DInput"))
+    {
+      SetDefaultDevice(std::move(*qualifier));
+      use_gamepad_defaults = true;
+    }
+#endif
+  };
+
+  const auto configure_standard_gamepad_mappings = [&] {
+#ifdef _WIN32
+    if (!use_gamepad_defaults)
+      return;
+
+    // Wiimote buttons
+    m_buttons->SetControlExpression(0, "`Button A`");   // A
+    m_buttons->SetControlExpression(1, "`Trigger R`");  // B
+    m_buttons->SetControlExpression(2, "`Button X`");   // 1
+    m_buttons->SetControlExpression(3, "`Button Y`");   // 2
+    m_buttons->SetControlExpression(4, "`Back`");       // -
+    m_buttons->SetControlExpression(5, "`Start`");      // +
+    m_buttons->SetControlExpression(6, "`Guide`");      // Home
+
+    // D-Pad
+    m_dpad->SetControlExpression(0, "`Pad N`");  // Up
+    m_dpad->SetControlExpression(1, "`Pad S`");  // Down
+    m_dpad->SetControlExpression(2, "`Pad W`");  // Left
+    m_dpad->SetControlExpression(3, "`Pad E`");  // Right
+
+    // Pointing (IR) - right stick
+    m_ir->SetControlExpression(0, "`Right Y-`");  // Up
+    m_ir->SetControlExpression(1, "`Right Y+`");  // Down
+    m_ir->SetControlExpression(2, "`Right X-`");  // Left
+    m_ir->SetControlExpression(3, "`Right X+`");  // Right
+    m_ir->SetControlExpression(5, "`Thumb R`");   // Recenter
+
+    // Shake - left shoulder
+    for (int i = 0; i < 3; ++i)
+      m_shake->SetControlExpression(i, "`Shoulder L`");
+#endif
+  };
+
+  set_default_gamepad_device_if_present();
+  configure_standard_gamepad_mappings();
+
+  if (!use_gamepad_defaults)
+  {
 // Buttons
 #if defined HAVE_X11 && HAVE_X11
   // A
@@ -790,11 +873,40 @@ void Wiimote::LoadDefaults(const ControllerInterface& ciface)
     m_ir_passthrough->SetControlExpression(i * 3 + 2, fmt::format("`IR Object {} Size`", i + 1));
   }
 #endif
+  }
 
   // Enable Nunchuk:
   constexpr ExtensionNumber DEFAULT_EXT = ExtensionNumber::NUNCHUK;
   m_attachments->SetSelectedAttachment(DEFAULT_EXT);
   m_attachments->GetAttachmentList()[DEFAULT_EXT]->LoadDefaults();
+
+#ifdef _WIN32
+  if (use_gamepad_defaults)
+  {
+    // Nunchuk stick - left stick
+    if (auto* const stick = GetNunchukGroup(NunchukGroup::Stick))
+    {
+      stick->SetControlExpression(0, "`Left Y-`");  // Up
+      stick->SetControlExpression(1, "`Left Y+`");  // Down
+      stick->SetControlExpression(2, "`Left X-`");  // Left
+      stick->SetControlExpression(3, "`Left X+`");  // Right
+    }
+
+    // Nunchuk buttons
+    if (auto* const buttons = GetNunchukGroup(NunchukGroup::Buttons))
+    {
+      buttons->SetControlExpression(0, "`Button B`");   // C
+      buttons->SetControlExpression(1, "`Trigger L`");  // Z
+    }
+
+    // Nunchuk shake (optional) - left shoulder
+    if (auto* const shake = GetNunchukGroup(NunchukGroup::Shake))
+    {
+      for (int i = 0; i < 3; ++i)
+        shake->SetControlExpression(i, "`Shoulder L`");
+    }
+  }
+#endif
 }
 
 Extension* Wiimote::GetNoneExtension() const
