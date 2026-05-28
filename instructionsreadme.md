@@ -2,6 +2,31 @@
 
 This fork includes Windows-focused defaults to make an Xbox controller (Xbox One / Series) behave like an **emulated Wii Remote** (plus Nunchuk) with minimal re-binding.
 
+## Easiest way (no commands): download a prebuilt zip
+
+If this repo has a **Release** (recommended) or a recent **Actions build artifact**, you can download and run Dolphin without using any command line.
+
+### Option A: GitHub Releases (best)
+
+1. Open the repo on GitHub.
+2. Click **Releases** (right side of the page).
+3. Download the latest `Dolphin-Xbox-friendly-Windows.zip` (or similarly named zip).
+4. Unzip it anywhere (Desktop is fine).
+5. Run `Dolphin.exe`.
+
+### Option B: GitHub Actions artifact (also no commands)
+
+1. Open the repo on GitHub.
+2. Click the **Actions** tab.
+3. Open the latest successful run of the **Build Windows (Xbox-friendly)** workflow.
+4. Scroll to **Artifacts** and download the zip.
+5. Unzip it anywhere.
+6. Run `Dolphin.exe`.
+
+If you don’t see Releases or Actions artifacts, the maintainer hasn’t published a build yet — use the “Build it yourself” section below.
+
+## Build it yourself (Windows)
+
 ## 1) Prereqs (Windows)
 
 - Windows 10 (1903+) or Windows 11
@@ -10,15 +35,7 @@ This fork includes Windows-focused defaults to make an Xbox controller (Xbox One
 
 ## 2) Build
 
-From a Developer PowerShell / cmd:
-
-```bat
-git clone <YOUR_FORK_URL>
-cd dolphin
-git submodule update --init --recursive
-```
-
-Open `Source/dolphin-emu.sln` in Visual Studio and build:
+Download the source code zip from GitHub, unzip it, then open `Source/dolphin-emu.sln` in Visual Studio and build:
 - Configuration: `Release`
 - Platform: `x64`
 
@@ -62,4 +79,3 @@ This fork tweaks defaults so that, when Dolphin starts and a real controller is 
   - In the controller config, pick the included profile and click `Load`.
 - **Want motion/gyro**
   - Xbox controllers generally don’t provide gyro; pointing is mapped to the right stick in this fork/profile.
-
