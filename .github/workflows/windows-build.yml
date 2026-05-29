@@ -1,5 +1,5 @@
 name: Build Windows (Xbox-friendly)
-  on:
+on:
     workflow_dispatch:
     push:
       branches: [xbox-friendly]
