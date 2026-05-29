@@ -1,0 +1,78 @@
+name: Build Linux (Xbox-friendly)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [xbox-friendly]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          lfs: true
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            git \
+            libevdev-dev \
+            libudev-dev \
+            libasound2-dev \
+            libpulse-dev \
+            libopenal-dev \
+            libcurl4-openssl-dev \
+            libmbedtls-dev \
+            libusb-1.0-0-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            qt6-base-dev \
+            qt6-base-dev-tools \
+            qt6-tools-dev \
+            qt6-tools-dev-tools
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake -S . -B Build -GNinja \
+            -DLINUX_LOCAL_DEV=true \
+            -DENABLE_ANALYTICS=OFF \
+            -DENABLE_DISCORD_PRESENCE=OFF
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake --build Build --parallel
+
+      - name: Make portable bundle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cp -r Data/Sys/ Build/Binaries/
+          touch Build/Binaries/portable.txt
+          tar -C Build -czf Dolphin-Xbox-friendly-Linux-Portable.tar.gz Binaries
+
+      - name: Upload portable bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dolphin-Xbox-friendly-Linux-Portable
+          path: Dolphin-Xbox-friendly-Linux-Portable.tar.gz
+          if-no-files-found: error
+
