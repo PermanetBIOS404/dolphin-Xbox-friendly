@@ -28,7 +28,7 @@ jobs:
             /p:Platform=x64 `
             /bl:msbuild.binlog `
             /fl `
-            /flp:logfile=msbuild.log;verbosity=diagnostic
+            "/flp:logfile=msbuild.log;verbosity=diagnostic"
 
       - name: Upload build logs
         if: always()

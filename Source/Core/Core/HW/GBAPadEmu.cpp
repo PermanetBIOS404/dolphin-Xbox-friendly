@@ -120,19 +120,19 @@ void GBAPad::LoadDefaults(const ControllerInterface& ciface)
       return std::nullopt;
     };
 
-    if (auto qualifier = choose_device("SDL"))
+    if (auto sdl_qualifier = choose_device("SDL"))
     {
-      SetDefaultDevice(std::move(*qualifier));
+      SetDefaultDevice(std::move(*sdl_qualifier));
       use_gamepad_defaults = true;
     }
-    else if (auto qualifier = choose_device("XInput"))
+    else if (auto xinput_qualifier = choose_device("XInput"))
     {
-      SetDefaultDevice(std::move(*qualifier));
+      SetDefaultDevice(std::move(*xinput_qualifier));
       use_gamepad_defaults = true;
     }
-    else if (auto qualifier = choose_device("DInput"))
+    else if (auto dinput_qualifier = choose_device("DInput"))
     {
-      SetDefaultDevice(std::move(*qualifier));
+      SetDefaultDevice(std::move(*dinput_qualifier));
       use_gamepad_defaults = true;
     }
   };
