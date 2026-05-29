@@ -1,38 +1,23 @@
 name: Build Windows (Xbox-friendly)
-
   on:
     workflow_dispatch:
     push:
       branches: [xbox-friendly]
-
   jobs:
     build:
       runs-on: windows-latest
       timeout-minutes: 120
-
       steps:
-        - name: Checkout
-          uses: actions/checkout@v4
+        - uses: actions/checkout@v4
           with:
             submodules: recursive
             fetch-depth: 0
             lfs: true
-
-        - name: Setup MSBuild
-          uses: microsoft/setup-msbuild@v2
-
-        - name: Build (Release x64)
+        - uses: microsoft/setup-msbuild@v2
+        - name: Build
           shell: pwsh
           run: msbuild .\Source\dolphin-emu.sln /m /p:Configuration=Release /p:Platform=x64
-
-        - name: List build outputs (debug)
-          shell: pwsh
-          run: |
-            if (Test-Path .\Binary) { Get-ChildItem .\Binary -Recurse -Force | Select-Object FullName }
-            if (Test-Path .\Binaries) { Get-ChildItem .\Binaries -Recurse -Force | Select-Object FullName }
-
-        - name: Upload artifact
-          uses: actions/upload-artifact@v4
+        - uses: actions/upload-artifact@v4
           with:
             name: Dolphin-Xbox-friendly-Windows
             path: |
