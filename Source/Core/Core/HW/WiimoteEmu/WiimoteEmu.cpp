@@ -49,6 +49,7 @@
 #include "InputCommon/ControllerEmu/ControlGroup/IRPassthrough.h"
 #include "InputCommon/ControllerEmu/ControlGroup/ModifySettingsButton.h"
 #include "InputCommon/ControllerEmu/ControlGroup/Tilt.h"
+#include "InputCommon/ControllerInterface/ControllerInterface.h"
 
 namespace WiimoteEmu
 {

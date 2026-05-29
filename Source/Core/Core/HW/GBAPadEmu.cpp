@@ -11,7 +11,7 @@
 #include "Core/HW/GBAPad.h"
 
 #include "InputCommon/ControllerEmu/ControlGroup/Buttons.h"
-#include "InputCommon/ControllerInterface/CoreDevice.h"
+#include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/GCPadStatus.h"
 
 static const u16 dpad_bitmasks[] = {PAD_BUTTON_UP, PAD_BUTTON_DOWN, PAD_BUTTON_LEFT,

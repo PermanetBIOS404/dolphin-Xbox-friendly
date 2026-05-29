@@ -17,6 +17,7 @@
 #include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
 #include "InputCommon/ControllerEmu/ControlGroup/MixedTriggers.h"
 #include "InputCommon/ControllerEmu/StickGate.h"
+#include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/ControllerInterface/CoreDevice.h"
 #include "InputCommon/GCPadStatus.h"
 
