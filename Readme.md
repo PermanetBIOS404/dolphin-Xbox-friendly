@@ -1,3 +1,119 @@
+## Xbox-Friendly Fork (Windows)
+
+  This repository is a fork of dolphin-emu/dolphin. The upstream project already supports gamepads, but this
+  fork adds Windows-focused defaults and stock profiles so that an Xbox One / Xbox Series controller is easier
+  to use for Wii games (especially when using Emulated Wii Remote instead of a real Wiimote). The goal is to
+  reduce the common “my controller worked yesterday, then an update happened and now it’s not the default
+  device / bindings feel broken” experience.
+
+  ### Goals
+
+  - Make an Xbox controller “just work” more often on Windows without having to re-bind everything.
+  - Prefer a real controller device by default (instead of keyboard/mouse) when the user is clearly trying to
+    play with a gamepad.
+
+  - Provide a ready-to-load stock profile for Emulated Wii Remote + Nunchuk, suitable for many games.
+  - Keep changes small and easy to maintain against upstream updates.
+
+  ### What’s different in this fork (high level)
+
+  #### 1) Windows default device selection prefers gamepads
+
+  On Windows, Dolphin often ends up with Keyboard Mouse as the default input device because it is always present
+  and prioritized. In this fork, when a real controller is connected at launch, default mappings prefer a
+  gamepad device in this order:
+
+  1. SDL
+  2. XInput
+  3. DInput (non-virtual joystick devices)
+
+  This affects default mapping behavior for:
+
+  - Emulated Wii Remote (Wii)
+  - GameCube Pad
+  - GBA Pad
+
+  If no gamepad is detected/connected, Dolphin behaves normally and keyboard/mouse defaults remain.
+
+  #### 2) Stock Emulated Wii Remote profile included
+
+  This fork ships a stock profile intended for Xbox-style controllers:
+
+  - Xbox Controller (XInput-SDL)
+
+  This profile maps typical Xbox controls to the most commonly used Wii Remote + Nunchuk inputs (including a
+  right-stick pointing cursor for IR-style aiming in many games). For games that require true motion/gyro: Xbox
+  controllers generally do not provide gyro sensors, so this fork focuses on a “stick-as-pointer + buttons”
+  approach.
+
+  #### 3) Setup documentation for non-technical users
+
+  See instructionsreadme.md for a step-by-step setup guide (including download/run instructions and
+  troubleshooting).
+
+  ### Downloading a ready-to-run build (no commands)
+
+  Do not use GitHub’s green Code → Download ZIP button if you just want to play. That downloads source code, not
+  a runnable Dolphin build.
+
+  To download a runnable Windows zip (contains Dolphin.exe and dependencies), use one of these:
+
+  #### Option A: GitHub Actions artifact (recommended for this fork)
+
+  1. Open the repo on GitHub.
+  2. Click the Actions tab.
+  3. In the left sidebar, click Build Windows (Xbox-friendly).
+  4. Open the latest successful run.
+  5. Under Artifacts, download the Windows build zip.
+  6. Unzip it anywhere (Desktop is fine).
+  7. Run Dolphin.exe.
+
+  If you do not see the Actions workflow or you do not see a successful run, a build has not been generated yet.
+  In that case, either build from source (see below) or wait for a successful Actions run / Release.
+
+  #### Option B: GitHub Releases (when available)
+
+  If a Release is published, download the Windows zip from the repo’s Releases page, unzip, and run.
+
+  ### Quick setup (Xbox controller as Emulated Wii Remote)
+
+  1. Connect the Xbox controller in Windows before launching Dolphin (USB, Bluetooth, or Xbox Wireless Adapter).
+  2. Launch Dolphin.
+  3. Open Controllers.
+  4. Under Wii Remotes, set Wii Remote 1 to Emulated Wii Remote and click Configure.
+  5. In the Profile dropdown, select Xbox Controller (XInput-SDL) (Stock) and click Load.
+
+  Notes:
+
+  - If you don’t want the Nunchuk, set the extension to None in the mapping UI.
+  - If pointing feels too fast/slow, adjust cursor/IR-related settings in the Emulated Wii Remote configuration.
+
+  ### Troubleshooting
+
+  - Controller not detected in Dolphin: confirm Windows sees it first (Bluetooth & devices, joy.cpl, etc.). Try
+    USB to rule out Bluetooth issues.
+
+  - Bindings still look like keyboard/mouse: quit Dolphin, connect the controller, relaunch, then load the stock
+    profile.
+
+  - Controller appears twice: on Windows you may see multiple backends (SDL/XInput/DInput). This fork prefers
+    SDL/XInput automatically, but you can still explicitly choose a device in the controller configuration if
+    needed.
+
+  - Motion/gyro required: Xbox controllers generally lack gyro; use stick-based pointing/shake bindings, or use
+    a controller/device that provides motion sensors.
+
+  ### Building from source (for developers)
+
+  This fork follows upstream build instructions (see below). If you are building on Windows, use the Visual
+  Studio solution at Source/dolphin-emu.sln and make sure submodules are initialized:
+
+  git submodule update --init --recursive
+
+  ———
+
+
+
 # Dolphin - A GameCube and Wii Emulator
 
 [Homepage](https://dolphin-emu.org/) | [Project Site](https://github.com/dolphin-emu/dolphin) | [Buildbot](https://dolphin.ci/) | [Forums](https://forums.dolphin-emu.org/) | [Wiki](https://wiki.dolphin-emu.org/) | [GitHub Wiki](https://github.com/dolphin-emu/dolphin/wiki) | [Issue Tracker](https://bugs.dolphin-emu.org/projects/emulator/issues) | [Coding Style](https://github.com/dolphin-emu/dolphin/blob/master/Contributing.md) | [Transifex Page](https://app.transifex.com/dolphinemu/dolphin-emu/dashboard/) | [Analytics](https://mon.dolphin-emu.org/)
