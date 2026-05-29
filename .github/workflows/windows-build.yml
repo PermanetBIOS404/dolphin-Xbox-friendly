@@ -21,9 +21,27 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: msbuild .\Source\dolphin-emu.sln /m /p:Configuration=Release /p:Platform=x64
+        run: |
+          msbuild .\Source\dolphin-emu.sln `
+            /m `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /bl:msbuild.binlog `
+            /fl `
+            /flp:logfile=msbuild.log;verbosity=diagnostic
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msbuild-logs
+          path: |
+            msbuild.binlog
+            msbuild.log
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: Dolphin-Xbox-friendly-Windows
           path: |
