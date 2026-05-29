@@ -16,6 +16,7 @@ name: Build Windows (Xbox-friendly)
           with:
             submodules: recursive
             fetch-depth: 0
+            lfs: true
 
         - name: Setup MSBuild
           uses: microsoft/setup-msbuild@v2
@@ -23,6 +24,12 @@ name: Build Windows (Xbox-friendly)
         - name: Build (Release x64)
           shell: pwsh
           run: msbuild .\Source\dolphin-emu.sln /m /p:Configuration=Release /p:Platform=x64
+
+        - name: List build outputs (debug)
+          shell: pwsh
+          run: |
+            if (Test-Path .\Binary) { Get-ChildItem .\Binary -Recurse -Force | Select-Object FullName }
+            if (Test-Path .\Binaries) { Get-ChildItem .\Binaries -Recurse -Force | Select-Object FullName }
 
         - name: Upload artifact
           uses: actions/upload-artifact@v4
