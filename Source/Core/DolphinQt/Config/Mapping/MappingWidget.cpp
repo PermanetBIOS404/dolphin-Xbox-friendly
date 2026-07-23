@@ -11,6 +11,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
 
 #include "DolphinQt/Config/Mapping/IOWindow.h"
@@ -18,6 +19,7 @@
 #include "DolphinQt/Config/Mapping/MappingIndicator.h"
 #include "DolphinQt/Config/Mapping/MappingNumeric.h"
 #include "DolphinQt/Config/Mapping/MappingWindow.h"
+#include "DolphinQt/QtUtils/ModalMessageBox.h"
 
 #include "InputCommon/ControllerEmu/Control/Control.h"
 #include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
@@ -178,22 +180,56 @@ QGroupBox* MappingWidget::CreateGroupBox(const QString& name, ControllerEmu::Con
 
   if (group->type == ControllerEmu::GroupType::Cursor)
   {
-    QPushButton* mouse_button = new QPushButton(tr("Use Mouse Controlled Pointing"));
+    QPushButton* mouse_button = new QPushButton(tr("Use Mouse as Wii Pointer"));
     form_layout->insertRow(2, mouse_button);
 
     using ControllerEmu::Cursor;
-    connect(mouse_button, &QCheckBox::clicked, [this, grp = static_cast<Cursor*>(group)] {
-      std::string default_device = g_controller_interface.GetDefaultDeviceString() + ":";
-      const std::string controller_device = GetController()->GetDefaultDevice().ToString() + ":";
-      if (default_device == controller_device)
-      {
-        default_device.clear();
-      }
-      grp->SetControlExpression(0, fmt::format("`{}Cursor Y-`", default_device));
-      grp->SetControlExpression(1, fmt::format("`{}Cursor Y+`", default_device));
-      grp->SetControlExpression(2, fmt::format("`{}Cursor X-`", default_device));
-      grp->SetControlExpression(3, fmt::format("`{}Cursor X+`", default_device));
+    connect(mouse_button, &QPushButton::clicked, [this, grp = static_cast<Cursor*>(group)] {
+      const auto devices = g_controller_interface.GetAllDevices();
+      const ciface::Core::Device* mouse_device = nullptr;
 
+      for (const auto& device : devices)
+      {
+        if (device->FindInput("Cursor Y-") && device->FindInput("Cursor Y+") &&
+            device->FindInput("Cursor X-") && device->FindInput("Cursor X+"))
+        {
+          mouse_device = device.get();
+          break;
+        }
+      }
+
+      if (!mouse_device)
+      {
+        ModalMessageBox::warning(
+            this, tr("Mouse Not Found"),
+            tr("Dolphin could not find a mouse device with Wii pointer controls. "
+               "Connect or enable a mouse, refresh the device list, and try again."));
+        return;
+      }
+
+      ModalMessageBox notice(this);
+      notice.setIcon(QMessageBox::Information);
+      notice.setWindowTitle(tr("Use Mouse as Wii Pointer"));
+      notice.setText(
+          tr("Your mouse will control the Wii hand pointer while your configured controller "
+             "remains active."));
+      notice.setInformativeText(
+          tr("Remember: if you are going to play a Wii game that needs Wii Remote motion "
+             "controls, please use a Wii Remote or another suitable motion controller—unless "
+             "you know the game can be fully played with an Xbox controller alone."));
+      notice.setStandardButtons(QMessageBox::Ok | QMessageBox::Cancel);
+
+      if (notice.exec() != QMessageBox::Ok)
+        return;
+
+      ciface::Core::DeviceQualifier mouse_qualifier;
+      mouse_qualifier.FromDevice(mouse_device);
+      const std::string mouse_prefix = mouse_qualifier.ToString() + ":";
+
+      grp->SetControlExpression(0, fmt::format("`{}Cursor Y-`", mouse_prefix));
+      grp->SetControlExpression(1, fmt::format("`{}Cursor Y+`", mouse_prefix));
+      grp->SetControlExpression(2, fmt::format("`{}Cursor X-`", mouse_prefix));
+      grp->SetControlExpression(3, fmt::format("`{}Cursor X+`", mouse_prefix));
       grp->SetRelativeInput(false);
 
       emit ConfigChanged();
