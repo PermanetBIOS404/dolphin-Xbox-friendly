@@ -205,6 +205,8 @@ const Info<bool>& GetInfoForSimulateKonga(int channel)
 const Info<bool> MAIN_WII_SD_CARD{{System::Main, "Core", "WiiSDCard"}, true};
 const Info<bool> MAIN_WII_SD_CARD_ENABLE_FOLDER_SYNC{
     {System::Main, "Core", "WiiSDCardEnableFolderSync"}, false};
+const Info<bool> MAIN_WII_SD_CARD_USE_PHYSICAL{
+    {System::Main, "Core", "WiiSDCardUsePhysical"}, false};
 const Info<u64> MAIN_WII_SD_CARD_FILESIZE{{System::Main, "Core", "WiiSDCardFilesize"}, 0};
 const Info<bool> MAIN_WII_KEYBOARD{{System::Main, "Core", "WiiKeyboard"}, false};
 const Info<bool> MAIN_WIIMOTE_CONTINUOUS_SCANNING{
@@ -334,6 +336,8 @@ const Info<std::string> MAIN_LOAD_PATH{{System::Main, "General", "LoadPath"}, ""
 const Info<std::string> MAIN_RESOURCEPACK_PATH{{System::Main, "General", "ResourcePackPath"}, ""};
 const Info<std::string> MAIN_FS_PATH{{System::Main, "General", "NANDRootPath"}, ""};
 const Info<std::string> MAIN_WII_SD_CARD_IMAGE_PATH{{System::Main, "General", "WiiSDCardPath"}, ""};
+const Info<std::string> MAIN_WII_SD_CARD_PHYSICAL_PATH{
+    {System::Main, "General", "WiiSDCardPhysicalPath"}, ""};
 const Info<std::string> MAIN_WII_SD_CARD_SYNC_FOLDER_PATH{
     {System::Main, "General", "WiiSDCardSyncFolder"}, ""};
 const Info<std::string> MAIN_WFS_PATH{{System::Main, "General", "WFSPath"}, ""};

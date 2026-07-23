@@ -12,6 +12,7 @@ template <typename T>
 class ConfigChoiceMap;
 class ConfigChoiceU32;
 class ConfigSliderU32;
+class ConfigText;
 class ConfigUserPath;
 class QLabel;
 class QListWidget;
@@ -43,6 +44,8 @@ private:
 
   void BrowseSDRaw();
   void BrowseSDSyncFolder();
+  void BrowsePhysicalSD();
+  void UpdatePhysicalSDControls();
 
   // Widgets
   QVBoxLayout* m_main_layout;
@@ -63,7 +66,10 @@ private:
   ConfigBool* m_sd_card_checkbox;
   ConfigBool* m_allow_sd_writes_checkbox;
   ConfigBool* m_sync_sd_folder_checkbox;
+  ConfigBool* m_use_physical_sd_checkbox;
   ConfigChoiceMap<u64>* m_sd_card_size_combo;
+  ConfigText* m_physical_sd_path_edit;
+  QPushButton* m_physical_sd_browse_button;
   ConfigUserPath* m_sd_raw_edit;
   ConfigUserPath* m_sd_sync_folder_edit;
   QPushButton* m_sd_pack_button;

@@ -31,6 +31,7 @@
 #include "DolphinQt/Config/ConfigControls/ConfigBool.h"
 #include "DolphinQt/Config/ConfigControls/ConfigChoice.h"
 #include "DolphinQt/Config/ConfigControls/ConfigSlider.h"
+#include "DolphinQt/Config/ConfigControls/ConfigText.h"
 #include "DolphinQt/Config/ConfigControls/ConfigUserPath.h"
 #include "DolphinQt/QtUtils/DolphinFileDialog.h"
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
@@ -191,6 +192,31 @@ void WiiPane::CreateSDCard()
     ++row;
   }
 
+  m_use_physical_sd_checkbox =
+      new ConfigBool(tr("Use Physical SD Card Source (Read-only Prototype)"),
+                     Config::MAIN_WII_SD_CARD_USE_PHYSICAL);
+  m_use_physical_sd_checkbox->SetDescription(
+      tr("Uses files from a selected physical SD card as the source for the emulated Wii SD "
+         "card. This prototype will not write changes back to the physical card."));
+  connect(m_use_physical_sd_checkbox, &ConfigBool::toggled, this,
+          &WiiPane::UpdatePhysicalSDControls);
+  sd_settings_group_layout->addWidget(m_use_physical_sd_checkbox, row, 0, 1, 2);
+  ++row;
+
+  {
+    QHBoxLayout* hlayout = new QHBoxLayout;
+    m_physical_sd_path_edit = new ConfigText(Config::MAIN_WII_SD_CARD_PHYSICAL_PATH);
+    m_physical_sd_browse_button = new NonDefaultQPushButton(QStringLiteral("..."));
+    connect(m_physical_sd_browse_button, &QPushButton::clicked, this,
+            &WiiPane::BrowsePhysicalSD);
+    hlayout->addWidget(new QLabel(tr("Physical SD Card Path:")));
+    hlayout->addWidget(m_physical_sd_path_edit);
+    hlayout->addWidget(m_physical_sd_browse_button);
+
+    sd_settings_group_layout->addLayout(hlayout, row, 0, 1, 2);
+    ++row;
+  }
+
   m_sync_sd_folder_checkbox = new ConfigBool(tr("Automatically Sync with Folder"),
                                              Config::MAIN_WII_SD_CARD_ENABLE_FOLDER_SYNC);
   m_sync_sd_folder_checkbox->SetDescription(
@@ -339,6 +365,8 @@ void WiiPane::OnEmulationStateChanged(bool running)
   m_sound_mode_choice->setEnabled(!running);
   m_sd_pack_button->setEnabled(!running);
   m_sd_unpack_button->setEnabled(!running);
+  m_use_physical_sd_checkbox->setEnabled(!running);
+  UpdatePhysicalSDControls();
   m_wiimote_motor->setEnabled(!running);
   m_wiimote_speaker_volume->setEnabled(!running);
   m_wiimote_ir_sensitivity->setEnabled(!running);
@@ -419,4 +447,21 @@ void WiiPane::BrowseSDSyncFolder()
       QString::fromStdString(File::GetUserPath(D_WIISDCARDSYNCFOLDER_IDX))));
   if (!file.isEmpty())
     m_sd_sync_folder_edit->SetTextAndUpdate(file);
+}
+
+void WiiPane::BrowsePhysicalSD()
+{
+  QString directory = QDir::toNativeSeparators(DolphinFileDialog::getExistingDirectory(
+      this, tr("Select Physical SD Card"),
+      QString::fromStdString(Config::Get(Config::MAIN_WII_SD_CARD_PHYSICAL_PATH))));
+  if (!directory.isEmpty())
+    m_physical_sd_path_edit->SetTextAndUpdate(directory);
+}
+
+void WiiPane::UpdatePhysicalSDControls()
+{
+  const bool enabled =
+      m_use_physical_sd_checkbox->isEnabled() && m_use_physical_sd_checkbox->isChecked();
+  m_physical_sd_path_edit->setEnabled(enabled);
+  m_physical_sd_browse_button->setEnabled(enabled);
 }

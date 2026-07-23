@@ -548,15 +548,73 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
   const bool delete_savestate =
       boot_session_data.GetDeleteSavestate() == DeleteSavestateAfterBoot::Yes;
 
-  bool sync_sd_folder = system.IsWii() && Config::Get(Config::MAIN_WII_SD_CARD) &&
-                        Config::Get(Config::MAIN_WII_SD_CARD_ENABLE_FOLDER_SYNC);
-  if (sync_sd_folder)
+  const bool use_physical_sd =
+      system.IsWii() && Config::Get(Config::MAIN_WII_SD_CARD) &&
+      Config::Get(Config::MAIN_WII_SD_CARD_USE_PHYSICAL);
+
+  const std::string original_sd_image_path = File::GetUserPath(F_WIISDCARDIMAGE_IDX);
+  const std::string original_sd_sync_folder_path =
+      File::GetUserPath(D_WIISDCARDSYNCFOLDER_IDX);
+
+  Common::ScopeGuard physical_sd_path_guard{
+      [use_physical_sd, original_sd_image_path, original_sd_sync_folder_path] {
+        if (!use_physical_sd)
+          return;
+
+        File::SetUserPath(F_WIISDCARDIMAGE_IDX, original_sd_image_path);
+        File::SetUserPath(D_WIISDCARDSYNCFOLDER_IDX, original_sd_sync_folder_path);
+      }};
+
+  bool sync_sd_folder =
+      system.IsWii() && Config::Get(Config::MAIN_WII_SD_CARD) && !use_physical_sd &&
+      Config::Get(Config::MAIN_WII_SD_CARD_ENABLE_FOLDER_SYNC);
+
+  if (use_physical_sd)
   {
-    sync_sd_folder = Common::SyncSDFolderToSDImage([] { return false; }, Core::WantsDeterminism());
+    const std::string physical_sd_path =
+        Config::Get(Config::MAIN_WII_SD_CARD_PHYSICAL_PATH);
+    const std::string bridge_image_path =
+        File::GetUserPath(D_CACHE_IDX) + "WiiSDPhysicalBridge.raw";
+
+    if (!File::IsDirectory(physical_sd_path))
+    {
+      PanicAlertFmtT(
+          "The selected physical SD card path does not exist or is not a directory:\n{0}",
+          physical_sd_path);
+      return;
+    }
+
+    if (File::Exists(bridge_image_path) && !File::Delete(bridge_image_path))
+    {
+      PanicAlertFmtT(
+          "Dolphin could not replace the previous Physical SD bridge image:\n{0}",
+          bridge_image_path);
+      return;
+    }
+
+    File::SetUserPath(D_WIISDCARDSYNCFOLDER_IDX, physical_sd_path);
+    File::SetUserPath(F_WIISDCARDIMAGE_IDX, bridge_image_path);
+
+    sync_sd_folder =
+        Common::SyncSDFolderToSDImage([] { return false; }, Core::WantsDeterminism());
+
+    if (!sync_sd_folder)
+    {
+      PanicAlertFmtT(
+          "Failed to prepare the read-only Physical SD bridge from:\n{0}\n\n"
+          "The Wii session was not started, and no files were written to the physical SD card.",
+          physical_sd_path);
+      return;
+    }
+  }
+  else if (sync_sd_folder)
+  {
+    sync_sd_folder =
+        Common::SyncSDFolderToSDImage([] { return false; }, Core::WantsDeterminism());
   }
 
-  Common::ScopeGuard sd_folder_sync_guard{[sync_sd_folder] {
-    if (sync_sd_folder && Config::Get(Config::MAIN_ALLOW_SD_WRITES))
+  Common::ScopeGuard sd_folder_sync_guard{[sync_sd_folder, use_physical_sd] {
+    if (sync_sd_folder && !use_physical_sd && Config::Get(Config::MAIN_ALLOW_SD_WRITES))
     {
       const bool sync_ok = Common::SyncSDImageToSDFolder([] { return false; });
       if (!sync_ok)
