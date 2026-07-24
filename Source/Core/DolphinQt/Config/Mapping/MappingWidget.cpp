@@ -5,6 +5,8 @@
 
 #include <fmt/core.h>
 
+#include <string_view>
+
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
@@ -21,13 +23,50 @@
 #include "DolphinQt/Config/Mapping/MappingWindow.h"
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 
+#include "Core/HW/WiimoteEmu/WiimoteEmu.h"
 #include "InputCommon/ControllerEmu/Control/Control.h"
+#include "InputCommon/ControllerEmu/ControlGroup/Buttons.h"
 #include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
 #include "InputCommon/ControllerEmu/ControlGroup/MixedTriggers.h"
 #include "InputCommon/ControllerEmu/ControllerEmu.h"
 #include "InputCommon/ControllerEmu/Setting/NumericSetting.h"
 #include "InputCommon/ControllerEmu/StickGate.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
+
+namespace
+{
+bool HasFullyQualifiedControl(const std::string& expression, const std::string& control)
+{
+  constexpr std::string_view delimiter = "`";
+  std::size_t start = 0;
+  while ((start = expression.find(delimiter, start)) != std::string::npos)
+  {
+    const std::size_t end = expression.find(delimiter, start + delimiter.size());
+    if (end == std::string::npos)
+      return false;
+
+    if (expression.substr(start, end - start + delimiter.size()) == control)
+      return true;
+
+    start = end + delimiter.size();
+  }
+  return false;
+}
+
+void AddMouseButtonBinding(ControllerEmu::ControlGroup* group, const int index,
+                           const std::string& mouse_expression)
+{
+  auto& reference = *group->controls[index]->control_ref;
+  const std::string existing_expression = reference.GetExpression();
+  if (HasFullyQualifiedControl(existing_expression, mouse_expression))
+    return;
+
+  if (existing_expression.find_first_not_of(" \t\r\n") == std::string::npos)
+    reference.SetExpression(mouse_expression);
+  else
+    reference.SetExpression(fmt::format("({}) | {}", existing_expression, mouse_expression));
+}
+}  // namespace
 
 MappingWidget::MappingWidget(MappingWindow* parent) : m_parent(parent)
 {
@@ -231,6 +270,17 @@ QGroupBox* MappingWidget::CreateGroupBox(const QString& name, ControllerEmu::Con
       grp->SetControlExpression(2, fmt::format("`{}Cursor X-`", mouse_prefix));
       grp->SetControlExpression(3, fmt::format("`{}Cursor X+`", mouse_prefix));
       grp->SetRelativeInput(false);
+
+      if (auto* const wiimote = dynamic_cast<WiimoteEmu::Wiimote*>(GetController()))
+      {
+        auto* const buttons = wiimote->GetWiimoteGroup(WiimoteEmu::WiimoteGroup::Buttons);
+        if (buttons != nullptr && buttons->type == ControllerEmu::GroupType::Buttons &&
+            buttons->controls.size() >= 2)
+        {
+          AddMouseButtonBinding(buttons, 0, fmt::format("`{}Click 1`", mouse_prefix));
+          AddMouseButtonBinding(buttons, 1, fmt::format("`{}Click 3`", mouse_prefix));
+        }
+      }
 
       emit ConfigChanged();
       GetController()->UpdateReferences(g_controller_interface);
