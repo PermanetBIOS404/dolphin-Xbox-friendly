@@ -3,14 +3,14 @@
 
 #include "Core/IOS/SDIO/SDIOSlot0.h"
 
-#include <cstdio>
+#include <limits>
 #include <memory>
+#include <span>
 #include <vector>
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
 #include "Common/FileUtil.h"
-#include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 #include "Common/SDCardUtil.h"
 
@@ -19,6 +19,7 @@
 #include "Core/Core.h"
 #include "Core/HW/Memmap.h"
 #include "Core/IOS/IOS.h"
+#include "Core/IOS/SDIO/SDStorage.h"
 #include "Core/IOS/VersionInfo.h"
 #include "Core/System.h"
 
@@ -66,6 +67,12 @@ void SDIOSlot0Device::DoState(PointerWrap& p)
   p.Do(m_sdhc_supported);
 }
 
+void SDIOSlot0Device::Update()
+{
+  if (m_card)
+    m_card->Update();
+}
+
 void SDIOSlot0Device::EventNotify()
 {
   if (!m_event)
@@ -87,16 +94,17 @@ void SDIOSlot0Device::EventNotify()
 void SDIOSlot0Device::OpenInternal()
 {
   const std::string filename = File::GetUserPath(F_WIISDCARDIMAGE_IDX);
-  m_card.Open(filename, "r+b");
-  if (!m_card)
+  m_card = CreateSDImageStorage(filename, false);
+  SDStorageResult result = m_card->Open();
+  if (result != SDStorageResult::Success)
   {
     WARN_LOG_FMT(IOS_SD, "Failed to open SD Card image, trying to create a new 128 MB image...");
     if (Common::SDCardCreate(128, filename))
     {
       INFO_LOG_FMT(IOS_SD, "Successfully created {}", filename);
-      m_card.Open(filename, "r+b");
+      result = m_card->Open();
     }
-    if (!m_card)
+    if (result != SDStorageResult::Success)
     {
       ERROR_LOG_FMT(IOS_SD, "Could not open SD Card image or create a new one, are you running "
                             "from a read-only directory?");
@@ -116,7 +124,8 @@ std::optional<IPCReply> SDIOSlot0Device::Open(const OpenRequest& request)
 
 std::optional<IPCReply> SDIOSlot0Device::Close(u32 fd)
 {
-  m_card.Close();
+  if (m_card)
+    m_card->Close();
   m_block_length = 0;
   m_bus_width = 0;
 
@@ -282,20 +291,26 @@ s32 SDIOSlot0Device::ExecuteCommand(const Request& request, u32 buffer_in, u32 b
     INFO_LOG_FMT(IOS_SD, "{}Read {} Block(s) from {:#010x} bsize {} into {:#010x}!",
                  req.isDMA ? "DMA " : "", req.blocks, req.arg, req.bsize, req.addr);
 
+    if (req.blocks != 0 && req.bsize > std::numeric_limits<u32>::max() / req.blocks)
+    {
+      ERROR_LOG_FMT(IOS_SD, "Read size overflow: {} blocks of {} bytes", req.blocks, req.bsize);
+      ret = RET_FAIL;
+      memory.Write_U32(0x900, buffer_out);
+      break;
+    }
+
     const u32 size = req.bsize * req.blocks;
     const u64 address = GetAddressFromRequest(req.arg);
+    u8* const data = memory.GetPointerForRange(req.addr, size);
 
-    if (!m_card.Seek(address, File::SeekOrigin::Begin))
-      ERROR_LOG_FMT(IOS_SD, "Seek failed");
-
-    if (m_card.ReadBytes(memory.GetPointerForRange(req.addr, size), size))
+    if (data && m_card &&
+        m_card->Read(address, std::span<u8>{data, size}) == SDStorageResult::Success)
     {
       DEBUG_LOG_FMT(IOS_SD, "Outbuffer size {} got {}", rw_buffer_size, size);
     }
     else
     {
-      ERROR_LOG_FMT(IOS_SD, "Read Failed - error: {}, eof: {}", std::ferror(m_card.GetHandle()),
-                    std::feof(m_card.GetHandle()));
+      ERROR_LOG_FMT(IOS_SD, "Read failed");
       ret = RET_FAIL;
     }
   }
@@ -316,16 +331,29 @@ s32 SDIOSlot0Device::ExecuteCommand(const Request& request, u32 buffer_in, u32 b
     }
     else
     {
+      if (req.blocks != 0 && req.bsize > std::numeric_limits<u32>::max() / req.blocks)
+      {
+        ERROR_LOG_FMT(IOS_SD, "Write size overflow: {} blocks of {} bytes", req.blocks, req.bsize);
+        ret = RET_FAIL;
+        memory.Write_U32(0x900, buffer_out);
+        break;
+      }
+
       const u32 size = req.bsize * req.blocks;
       const u64 address = GetAddressFromRequest(req.arg);
+      const u8* const data = memory.GetPointerForRange(req.addr, size);
 
-      if (!m_card.Seek(address, File::SeekOrigin::Begin))
-        ERROR_LOG_FMT(IOS_SD, "Seek failed");
-
-      if (!m_card.WriteBytes(memory.GetPointerForRange(req.addr, size), size))
+      const SDStorageResult result =
+          data && m_card ? m_card->Write(address, std::span<const u8>{data, size}) :
+                           SDStorageResult::NoMedia;
+      if (result == SDStorageResult::WriteProtected)
       {
-        ERROR_LOG_FMT(IOS_SD, "Write Failed - error: {}, eof: {}", std::ferror(m_card.GetHandle()),
-                      std::feof(m_card.GetHandle()));
+        ERROR_LOG_FMT(IOS_SD, "Write attempted while storage is read-only.");
+        ret = RET_LOCKED;
+      }
+      else if (result != SDStorageResult::Success)
+      {
+        ERROR_LOG_FMT(IOS_SD, "Write failed");
         ret = RET_FAIL;
       }
     }
@@ -470,7 +498,8 @@ std::optional<IPCReply> SDIOSlot0Device::SendCommand(const IOCtlRequest& request
 IPCReply SDIOSlot0Device::GetStatus(const IOCtlRequest& request)
 {
   // Since IOS does the SD initialization itself, we just say we're always initialized.
-  if (m_card.GetSize() <= SDSC_MAX_SIZE)
+  const u64 card_size = m_card ? m_card->GetSize() : 0;
+  if (card_size <= SDSC_MAX_SIZE)
   {
     // No further initialization required.
     m_status |= CARD_INITIALIZED;
@@ -547,7 +576,7 @@ u32 SDIOSlot0Device::GetOCRegister() const
 
 std::array<u32, 4> SDIOSlot0Device::GetCSDv1() const
 {
-  u64 size = m_card.GetSize();
+  u64 size = m_card ? m_card->GetSize() : 0;
 
   // 512 bytes/sector. A 2GB card should only ever have to bump this up to 10
   u32 read_bl_len = 9;
@@ -637,7 +666,7 @@ std::array<u32, 4> SDIOSlot0Device::GetCSDv1() const
 
 std::array<u32, 4> SDIOSlot0Device::GetCSDv2() const
 {
-  const u64 size = m_card.GetSize();
+  const u64 size = m_card ? m_card->GetSize() : 0;
 
   if (size % (512 * 1024) != 0)
     WARN_LOG_FMT(IOS_SD, "SDHC Card size cannot be divided by 1024 * 512");

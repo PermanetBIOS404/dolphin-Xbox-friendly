@@ -6,10 +6,10 @@
 #pragma once
 
 #include <array>
+#include <memory>
 #include <string>
 
 #include "Common/CommonTypes.h"
-#include "Common/IOFile.h"
 #include "Core/CPUThreadConfigCallback.h"
 #include "Core/IOS/Device.h"
 #include "Core/IOS/IOS.h"
@@ -18,6 +18,8 @@ class PointerWrap;
 
 namespace IOS::HLE
 {
+class SDStorage;
+
 // The front SD slot
 class SDIOSlot0Device : public EmulationDevice
 {
@@ -26,6 +28,7 @@ public:
   ~SDIOSlot0Device() override;
 
   void DoState(PointerWrap& p) override;
+  void Update() override;
 
   std::optional<IPCReply> Open(const OpenRequest& request) override;
   std::optional<IPCReply> Close(u32 fd) override;
@@ -167,7 +170,7 @@ private:
 
   std::array<u32, 0x200 / sizeof(u32)> m_registers{};
 
-  File::IOFile m_card;
+  std::unique_ptr<SDStorage> m_card;
 
   CPUThreadConfigCallback::ConfigChangedCallbackID m_config_callback_id;
   bool m_sd_card_inserted = false;

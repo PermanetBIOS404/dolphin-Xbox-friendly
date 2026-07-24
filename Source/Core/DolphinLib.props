@@ -414,6 +414,7 @@
     <ClInclude Include="Core\IOS\Network\SSL.h" />
     <ClInclude Include="Core\IOS\Network\WD\Command.h" />
     <ClInclude Include="Core\IOS\SDIO\SDIOSlot0.h" />
+    <ClInclude Include="Core\IOS\SDIO\SDStorage.h" />
     <ClInclude Include="Core\IOS\STM\STM.h" />
     <ClInclude Include="Core\IOS\Uids.h" />
     <ClInclude Include="Core\IOS\USB\Bluetooth\BTBase.h" />
@@ -1124,6 +1125,7 @@
     <ClCompile Include="Core\IOS\Network\SSL.cpp" />
     <ClCompile Include="Core\IOS\Network\WD\Command.cpp" />
     <ClCompile Include="Core\IOS\SDIO\SDIOSlot0.cpp" />
+    <ClCompile Include="Core\IOS\SDIO\SDStorage.cpp" />
     <ClCompile Include="Core\IOS\STM\STM.cpp" />
     <ClCompile Include="Core\IOS\USB\Bluetooth\BTBase.cpp" />
     <ClCompile Include="Core\IOS\USB\Bluetooth\BTEmu.cpp" />
