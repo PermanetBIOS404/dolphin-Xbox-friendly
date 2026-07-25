@@ -442,6 +442,8 @@ add_library(core
   IOS/SDIO/SDStorage.h
   IOS/SDIO/SDStorageConfig.cpp
   IOS/SDIO/SDStorageConfig.h
+  IOS/SDIO/SDStoragePreflight.cpp
+  IOS/SDIO/SDStoragePreflight.h
   IOS/STM/STM.cpp
   IOS/STM/STM.h
   IOS/USB/Bluetooth/BTBase.cpp
@@ -601,6 +603,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
     IOS/SDIO/SDStorageLinux.cpp
     IOS/SDIO/SDStorageLinux.h
     IOS/SDIO/SDStorageLinuxPrivate.h
+    IOS/SDIO/SDStoragePreflightLinux.cpp
+    IOS/SDIO/SDStoragePreflightLinux.h
+    IOS/SDIO/SDStoragePreflightLinuxPrivate.h
   )
 endif()
 

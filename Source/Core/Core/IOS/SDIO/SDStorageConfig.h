@@ -11,6 +11,7 @@
 
 #include "Core/Config/MainSettings.h"
 #include "Core/IOS/SDIO/SDStorage.h"
+#include "Core/IOS/SDIO/SDStoragePreflight.h"
 
 namespace IOS::HLE
 {
@@ -34,6 +35,9 @@ struct SDStorageOpenResult
   std::unique_ptr<SDStorage> storage;
   SDStorageResult result = SDStorageResult::IoError;
   SDStorageBackendKind backend_kind = SDStorageBackendKind::ImageFile;
+  PhysicalSDPreflightOutcome preflight{
+      .result = PhysicalSDPreflightResult::Ready,
+  };
 };
 
 struct SDStorageModeControlState
@@ -48,6 +52,7 @@ std::unique_ptr<SDStorageBackendFactory> CreateSDStorageBackendFactory();
 SDStorageOpenResult
 OpenConfiguredSDStorage(Config::WiiSDStorageMode mode, std::string image_path,
                         std::string physical_device_path, SDStorageBackendFactory& factory,
+                        PhysicalSDPreflight& preflight,
                         const std::function<bool()>& create_blank_image);
 
 bool IsSDStorageWriteProtected(const SDStorage& storage, bool allow_image_writes);
@@ -56,6 +61,7 @@ SDStorageResult WriteToSDStorage(SDStorage& storage, bool allow_image_writes, u6
 s32 GetSDIOWriteCommandResult(SDStorageResult result);
 
 SDStorageModeControlState GetSDStorageModeControlState(Config::WiiSDStorageMode mode);
-std::string_view GetPhysicalSDStorageErrorReason(SDStorageResult result);
-std::string GetPhysicalSDStorageErrorMessage(std::string_view path, SDStorageResult result);
+std::string GetPhysicalSDStorageErrorReason(const SDStorageOpenResult& open_result);
+std::string GetPhysicalSDStorageErrorMessage(std::string_view path,
+                                             const SDStorageOpenResult& open_result);
 }  // namespace IOS::HLE

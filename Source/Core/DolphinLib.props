@@ -416,6 +416,7 @@
     <ClInclude Include="Core\IOS\SDIO\SDIOSlot0.h" />
     <ClInclude Include="Core\IOS\SDIO\SDStorage.h" />
     <ClInclude Include="Core\IOS\SDIO\SDStorageConfig.h" />
+    <ClInclude Include="Core\IOS\SDIO\SDStoragePreflight.h" />
     <ClInclude Include="Core\IOS\STM\STM.h" />
     <ClInclude Include="Core\IOS\Uids.h" />
     <ClInclude Include="Core\IOS\USB\Bluetooth\BTBase.h" />
@@ -1128,6 +1129,7 @@
     <ClCompile Include="Core\IOS\SDIO\SDIOSlot0.cpp" />
     <ClCompile Include="Core\IOS\SDIO\SDStorage.cpp" />
     <ClCompile Include="Core\IOS\SDIO\SDStorageConfig.cpp" />
+    <ClCompile Include="Core\IOS\SDIO\SDStoragePreflight.cpp" />
     <ClCompile Include="Core\IOS\STM\STM.cpp" />
     <ClCompile Include="Core\IOS\USB\Bluetooth\BTBase.cpp" />
     <ClCompile Include="Core\IOS\USB\Bluetooth\BTEmu.cpp" />

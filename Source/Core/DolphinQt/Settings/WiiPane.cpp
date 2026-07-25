@@ -206,8 +206,10 @@ void WiiPane::CreateSDCard()
   ++row;
 
   m_sd_physical_read_only_warning =
-      new QLabel(tr("Read-only physical device mode: Dolphin will reject every write. The device "
-                    "must be unmounted before emulation starts."));
+      new QLabel(tr("Read-only physical device mode: stable /dev/disk/by-uuid paths are "
+                    "recommended, and Dolphin will reject every write. Unmount the filesystem "
+                    "before emulation while leaving the card and reader connected. Unmount "
+                    "detaches the filesystem; Eject may power down or remove the device."));
   m_sd_physical_read_only_warning->setObjectName(QStringLiteral("sd_physical_read_only_warning"));
   m_sd_physical_read_only_warning->setWordWrap(true);
   sd_settings_group_layout->addWidget(m_sd_physical_read_only_warning, row, 0, 1, 2);

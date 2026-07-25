@@ -20,6 +20,7 @@ add_dolphin_test(SDStorageTest IOS/SDIO/SDStorageTest.cpp)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
   add_dolphin_test(SDStorageLinuxTest IOS/SDIO/SDStorageLinuxTest.cpp)
+  add_dolphin_test(SDStoragePreflightLinuxTest IOS/SDIO/SDStoragePreflightLinuxTest.cpp)
 endif()
 
 add_dolphin_test(SkylandersTest IOS/USB/SkylandersTest.cpp)

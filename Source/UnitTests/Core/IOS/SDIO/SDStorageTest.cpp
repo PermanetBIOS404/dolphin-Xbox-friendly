@@ -227,6 +227,24 @@ public:
   FakeConfiguredStorage* last_storage = nullptr;
 };
 
+class FakePhysicalSDPreflight final : public PhysicalSDPreflight
+{
+public:
+  PhysicalSDPreflightOutcome Check(const std::string& path) override
+  {
+    ++check_calls;
+    checked_path = path;
+    return outcome;
+  }
+
+  PhysicalSDPreflightOutcome outcome{
+      .result = PhysicalSDPreflightResult::Ready,
+      .resolved_path = "/simulated/resolved-device",
+  };
+  int check_calls = 0;
+  std::string checked_path;
+};
+
 TEST(SDStorageConfigurationTest, VirtualImageIsDefaultAndModesHaveStableSerializedValues)
 {
   EXPECT_EQ(Config::MAIN_WII_SD_STORAGE_MODE.GetDefaultValue(),
@@ -264,10 +282,11 @@ TEST(SDStorageConfigurationTest, InvalidModeFallsBackToVirtualImage)
 TEST(SDStorageSelectionTest, ImageModeSelectsOnlyImageBackend)
 {
   FakeSDStorageBackendFactory factory;
+  FakePhysicalSDPreflight preflight;
   int image_creation_calls = 0;
   SDStorageOpenResult result = OpenConfiguredSDStorage(
       Config::WiiSDStorageMode::VirtualSDImage, "/temporary/image.raw", "/simulated/device",
-      factory, [&image_creation_calls] {
+      factory, preflight, [&image_creation_calls] {
         ++image_creation_calls;
         return false;
       });
@@ -278,15 +297,17 @@ TEST(SDStorageSelectionTest, ImageModeSelectsOnlyImageBackend)
   EXPECT_EQ(factory.physical_create_calls, 0);
   EXPECT_EQ(factory.image_path, "/temporary/image.raw");
   EXPECT_EQ(image_creation_calls, 0);
+  EXPECT_EQ(preflight.check_calls, 0);
 }
 
 TEST(SDStorageSelectionTest, PhysicalModeSelectsOnlyReadOnlyBackend)
 {
   FakeSDStorageBackendFactory factory;
+  FakePhysicalSDPreflight preflight;
   int image_creation_calls = 0;
   SDStorageOpenResult result = OpenConfiguredSDStorage(
       Config::WiiSDStorageMode::PhysicalDeviceReadOnly, "/temporary/image.raw",
-      "/simulated/device", factory, [&image_creation_calls] {
+      "/simulated/device", factory, preflight, [&image_creation_calls] {
         ++image_creation_calls;
         return false;
       });
@@ -298,16 +319,19 @@ TEST(SDStorageSelectionTest, PhysicalModeSelectsOnlyReadOnlyBackend)
   EXPECT_EQ(factory.physical_path, "/simulated/device");
   EXPECT_EQ(image_creation_calls, 0);
   EXPECT_TRUE(result.storage->IsReadOnly());
+  EXPECT_EQ(preflight.check_calls, 1);
+  EXPECT_EQ(preflight.checked_path, "/simulated/device");
 }
 
 TEST(SDStorageSelectionTest, RawOpenFailureNeverFallsBackOrCreatesImage)
 {
   FakeSDStorageBackendFactory factory;
+  FakePhysicalSDPreflight preflight;
   factory.physical_open_result = SDStorageResult::PermissionDenied;
   int image_creation_calls = 0;
   SDStorageOpenResult result = OpenConfiguredSDStorage(
       Config::WiiSDStorageMode::PhysicalDeviceReadOnly, "/temporary/image.raw",
-      "/simulated/device", factory, [&image_creation_calls] {
+      "/simulated/device", factory, preflight, [&image_creation_calls] {
         ++image_creation_calls;
         return true;
       });
@@ -318,28 +342,82 @@ TEST(SDStorageSelectionTest, RawOpenFailureNeverFallsBackOrCreatesImage)
   EXPECT_EQ(image_creation_calls, 0);
 }
 
+TEST(SDStorageSelectionTest, SuccessfulPreflightPreservesAuthoritativeBackendFailures)
+{
+  for (const SDStorageResult backend_result :
+       {SDStorageResult::Busy, SDStorageResult::PermissionDenied, SDStorageResult::NoMedia})
+  {
+    FakeSDStorageBackendFactory factory;
+    FakePhysicalSDPreflight preflight;
+    factory.physical_open_result = backend_result;
+    int image_creation_calls = 0;
+
+    const SDStorageOpenResult result = OpenConfiguredSDStorage(
+        Config::WiiSDStorageMode::PhysicalDeviceReadOnly, "/temporary/image.raw",
+        "/simulated/device", factory, preflight, [&image_creation_calls] {
+          ++image_creation_calls;
+          return true;
+        });
+
+    EXPECT_EQ(result.preflight.result, PhysicalSDPreflightResult::Ready);
+    EXPECT_EQ(result.result, backend_result);
+    EXPECT_EQ(factory.physical_create_calls, 1);
+    EXPECT_EQ(factory.image_create_calls, 0);
+    EXPECT_EQ(image_creation_calls, 0);
+  }
+}
+
+TEST(SDStorageSelectionTest, PreflightFailureNeverCreatesAnyBackendOrImage)
+{
+  FakeSDStorageBackendFactory factory;
+  FakePhysicalSDPreflight preflight;
+  preflight.outcome = {
+      .result = PhysicalSDPreflightResult::Mounted,
+      .resolved_path = "/simulated/resolved-device",
+      .mount_point = "/mnt/simulated",
+  };
+  int image_creation_calls = 0;
+
+  const SDStorageOpenResult result = OpenConfiguredSDStorage(
+      Config::WiiSDStorageMode::PhysicalDeviceReadOnly, "/temporary/image.raw",
+      "/simulated/device", factory, preflight, [&image_creation_calls] {
+        ++image_creation_calls;
+        return true;
+      });
+
+  EXPECT_EQ(result.result, SDStorageResult::Busy);
+  EXPECT_EQ(factory.physical_create_calls, 0);
+  EXPECT_EQ(factory.image_create_calls, 0);
+  EXPECT_EQ(image_creation_calls, 0);
+}
+
 TEST(SDStorageSelectionTest, EmptyPhysicalPathDoesNotInvokeAnyFactory)
 {
   FakeSDStorageBackendFactory factory;
+  FakePhysicalSDPreflight preflight;
+  preflight.outcome = {.result = PhysicalSDPreflightResult::EmptyPath};
   SDStorageOpenResult result = OpenConfiguredSDStorage(
       Config::WiiSDStorageMode::PhysicalDeviceReadOnly, "/temporary/image.raw", "", factory,
-      [] { return true; });
+      preflight, [] { return true; });
 
   EXPECT_EQ(result.result, SDStorageResult::NoMedia);
   EXPECT_EQ(factory.image_create_calls, 0);
   EXPECT_EQ(factory.physical_create_calls, 0);
+  EXPECT_EQ(preflight.check_calls, 1);
 }
 
 TEST(SDStorageSelectionTest, UnsupportedPlatformFailureIsDeterministic)
 {
   FakeSDStorageBackendFactory factory;
-  factory.physical_open_result = SDStorageResult::UnsupportedPlatform;
+  FakePhysicalSDPreflight preflight;
+  preflight.outcome = {.result = PhysicalSDPreflightResult::UnsupportedPlatform};
   SDStorageOpenResult result = OpenConfiguredSDStorage(
       Config::WiiSDStorageMode::PhysicalDeviceReadOnly, "/temporary/image.raw",
-      "/simulated/device", factory, [] { return false; });
+      "/simulated/device", factory, preflight, [] { return false; });
 
   EXPECT_EQ(result.result, SDStorageResult::UnsupportedPlatform);
   EXPECT_EQ(result.backend_kind, SDStorageBackendKind::PhysicalDeviceReadOnly);
+  EXPECT_EQ(factory.physical_create_calls, 0);
 }
 
 TEST(SDStorageWriteProtectionTest, ReadOnlyBackendCannotBeOverriddenOrReached)
@@ -366,12 +444,14 @@ TEST(SDStorageWriteProtectionTest, ImageBackendFollowsAllowWritesSetting)
 
 TEST(SDStorageSettingsStateTest, RawModeDisablesImageControlsWithoutOpeningStorage)
 {
+  FakePhysicalSDPreflight preflight;
   const SDStorageModeControlState state =
       GetSDStorageModeControlState(Config::WiiSDStorageMode::PhysicalDeviceReadOnly);
 
   EXPECT_FALSE(state.image_controls_enabled);
   EXPECT_TRUE(state.physical_path_enabled);
   EXPECT_TRUE(state.read_only_warning_visible);
+  EXPECT_EQ(preflight.check_calls, 0);
 }
 
 TEST(SDStorageSettingsStateTest, ReturningToImageModeRestoresImageControls)
@@ -386,31 +466,71 @@ TEST(SDStorageSettingsStateTest, ReturningToImageModeRestoresImageControls)
 
 TEST(SDStorageErrorTest, PhysicalFailuresHaveSpecificSafeReasons)
 {
-  EXPECT_NE(GetPhysicalSDStorageErrorReason(SDStorageResult::PermissionDenied).find("permission"),
-            std::string_view::npos);
-  EXPECT_NE(GetPhysicalSDStorageErrorReason(SDStorageResult::Busy).find("mounted"),
-            std::string_view::npos);
-  EXPECT_NE(GetPhysicalSDStorageErrorReason(SDStorageResult::NoMedia).find("missing"),
-            std::string_view::npos);
-  EXPECT_NE(GetPhysicalSDStorageErrorReason(SDStorageResult::NotBlockDevice).find("block device"),
-            std::string_view::npos);
-  EXPECT_NE(
-      GetPhysicalSDStorageErrorReason(SDStorageResult::UnsupportedSectorSize).find("512-byte"),
-      std::string_view::npos);
-  EXPECT_NE(GetPhysicalSDStorageErrorReason(SDStorageResult::IoError).find("I/O"),
-            std::string_view::npos);
+  SDStorageOpenResult result;
+  result.backend_kind = SDStorageBackendKind::PhysicalDeviceReadOnly;
+
+  result.preflight.result = PhysicalSDPreflightResult::PermissionDenied;
+  EXPECT_NE(GetPhysicalSDStorageErrorReason(result).find("permission"), std::string::npos);
+  result.preflight = {.result = PhysicalSDPreflightResult::Mounted, .mount_point = "/mnt/card"};
+  EXPECT_NE(GetPhysicalSDStorageErrorReason(result).find("mounted"), std::string::npos);
+  result.preflight.result = PhysicalSDPreflightResult::Missing;
+  EXPECT_NE(GetPhysicalSDStorageErrorReason(result).find("missing"), std::string::npos);
+  result.preflight.result = PhysicalSDPreflightResult::NotBlockDevice;
+  EXPECT_NE(GetPhysicalSDStorageErrorReason(result).find("block-device"), std::string::npos);
+
+  result.preflight.result = PhysicalSDPreflightResult::Ready;
+  result.result = SDStorageResult::UnsupportedSectorSize;
+  EXPECT_NE(GetPhysicalSDStorageErrorReason(result).find("512-byte"), std::string::npos);
+  result.result = SDStorageResult::IoError;
+  EXPECT_NE(GetPhysicalSDStorageErrorReason(result).find("I/O"), std::string::npos);
 }
 
 TEST(SDStorageErrorTest, StartupMessageIncludesPathGuidanceAndNoWriteAssurance)
 {
-  const std::string message =
-      GetPhysicalSDStorageErrorMessage("/simulated/device", SDStorageResult::Busy);
+  SDStorageOpenResult result;
+  result.result = SDStorageResult::Busy;
+  result.backend_kind = SDStorageBackendKind::PhysicalDeviceReadOnly;
+  result.preflight = {
+      .result = PhysicalSDPreflightResult::Mounted,
+      .mount_point = "/mnt/simulated card",
+  };
+  const std::string message = GetPhysicalSDStorageErrorMessage("/simulated/device", result);
 
   EXPECT_NE(message.find("Physical SD Device mode failed"), std::string::npos);
   EXPECT_NE(message.find("/simulated/device"), std::string::npos);
   EXPECT_NE(message.find("mounted"), std::string::npos);
-  EXPECT_NE(message.find("unmounted"), std::string::npos);
+  EXPECT_NE(message.find("Unmount"), std::string::npos);
+  EXPECT_NE(message.find("do not eject"), std::string::npos);
   EXPECT_NE(message.find("Dolphin did not write to the card"), std::string::npos);
+}
+
+TEST(SDStorageErrorTest, PermissionMessageRejectsRootAndRequiresNarrowReadOnlyAccess)
+{
+  SDStorageOpenResult result;
+  result.result = SDStorageResult::PermissionDenied;
+  result.backend_kind = SDStorageBackendKind::PhysicalDeviceReadOnly;
+  result.preflight = {.result = PhysicalSDPreflightResult::PermissionDenied};
+
+  const std::string message = GetPhysicalSDStorageErrorMessage("/simulated/device", result);
+  EXPECT_NE(message.find("Do not run Dolphin as root"), std::string::npos);
+  EXPECT_NE(message.find("narrowly scoped read-only permissions"), std::string::npos);
+  EXPECT_NE(message.find("Dolphin did not write to the card"), std::string::npos);
+}
+
+TEST(SDStorageErrorTest, BackendRaceFailuresRemainSpecific)
+{
+  SDStorageOpenResult result;
+  result.backend_kind = SDStorageBackendKind::PhysicalDeviceReadOnly;
+  result.preflight = {.result = PhysicalSDPreflightResult::Ready};
+
+  result.result = SDStorageResult::Busy;
+  EXPECT_NE(GetPhysicalSDStorageErrorReason(result).find("authoritative exclusive open"),
+            std::string::npos);
+  result.result = SDStorageResult::PermissionDenied;
+  EXPECT_NE(GetPhysicalSDStorageErrorReason(result).find("authoritative read-only"),
+            std::string::npos);
+  result.result = SDStorageResult::NoMedia;
+  EXPECT_NE(GetPhysicalSDStorageErrorReason(result).find("disappeared"), std::string::npos);
 }
 }  // namespace
 }  // namespace IOS::HLE

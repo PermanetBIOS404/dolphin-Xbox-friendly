@@ -100,8 +100,9 @@ SDStorageResult SDIOSlot0Device::OpenInternal()
   const std::string physical_device_path =
       Config::Get(Config::MAIN_WII_SD_PHYSICAL_DEVICE_PATH);
   auto factory = CreateSDStorageBackendFactory();
+  auto preflight = CreatePhysicalSDPreflight();
   SDStorageOpenResult open_result = OpenConfiguredSDStorage(
-      mode, filename, physical_device_path, *factory, [&filename] {
+      mode, filename, physical_device_path, *factory, *preflight, [&filename] {
         WARN_LOG_FMT(IOS_SD,
                      "Failed to open SD Card image, trying to create a new 128 MB image...");
         const bool created = Common::SDCardCreate(128, filename);
@@ -127,10 +128,10 @@ SDStorageResult SDIOSlot0Device::OpenInternal()
     return open_result.result;
   }
 
-  const std::string_view reason = GetPhysicalSDStorageErrorReason(open_result.result);
+  const std::string reason = GetPhysicalSDStorageErrorReason(open_result);
   ERROR_LOG_FMT(IOS_SD, "Physical SD Device mode failed for '{}': {}", physical_device_path,
                 reason);
-  CriticalAlertFmt("{}", GetPhysicalSDStorageErrorMessage(physical_device_path, open_result.result));
+  CriticalAlertFmt("{}", GetPhysicalSDStorageErrorMessage(physical_device_path, open_result));
   Core::QueueHostJob(&Core::Stop);
   return open_result.result;
 }
