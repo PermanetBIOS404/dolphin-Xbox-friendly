@@ -594,6 +594,14 @@ add_library(core
   WiiUtils.h
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+  target_sources(core PRIVATE
+    IOS/SDIO/SDStorageLinux.cpp
+    IOS/SDIO/SDStorageLinux.h
+    IOS/SDIO/SDStorageLinuxPrivate.h
+  )
+endif()
+
 if(_M_X86_64)
   target_sources(core PRIVATE
     DSP/Jit/x64/DSPEmitter.cpp
