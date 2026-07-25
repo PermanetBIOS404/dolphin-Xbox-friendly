@@ -109,6 +109,18 @@ extern const Info<std::string> MAIN_MODEM_TAPSERVER_DESTINATION;
 const Info<SerialInterface::SIDevices>& GetInfoForSIDevice(int channel);
 const Info<bool>& GetInfoForAdapterRumble(int channel);
 const Info<bool>& GetInfoForSimulateKonga(int channel);
+
+enum class WiiSDStorageMode : int
+{
+  VirtualSDImage = 0,
+  PhysicalDeviceReadOnly = 1,
+};
+
+extern const Info<WiiSDStorageMode> MAIN_WII_SD_STORAGE_MODE;
+extern const Info<std::string> MAIN_WII_SD_PHYSICAL_DEVICE_PATH;
+WiiSDStorageMode ValidateWiiSDStorageMode(WiiSDStorageMode mode);
+WiiSDStorageMode GetWiiSDStorageMode();
+
 extern const Info<bool> MAIN_WII_SD_CARD;
 extern const Info<bool> MAIN_WII_SD_CARD_ENABLE_FOLDER_SYNC;
 extern const Info<u64> MAIN_WII_SD_CARD_FILESIZE;

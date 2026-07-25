@@ -197,7 +197,7 @@ TEST(SDStorageLinuxTest, RejectsRegularFile)
   auto [storage, operations] = MakeStorage();
   operations->node_mode = S_IFREG | 0600;
 
-  EXPECT_EQ(storage->Open(), SDStorageResult::IoError);
+  EXPECT_EQ(storage->Open(), SDStorageResult::NotBlockDevice);
   EXPECT_FALSE(storage->IsPresent());
   EXPECT_EQ(operations->close_calls, 1);
   EXPECT_EQ(operations->ioctl_calls, 0);

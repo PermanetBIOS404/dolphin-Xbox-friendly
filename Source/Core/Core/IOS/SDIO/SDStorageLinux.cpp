@@ -93,7 +93,7 @@ public:
       return FailOpen(ResultFromErrno(errno));
 
     if (!S_ISBLK(status.st_mode))
-      return FailOpen(SDStorageResult::IoError);
+      return FailOpen(SDStorageResult::NotBlockDevice);
 
     u64 capacity = 0;
     errno = 0;

@@ -12,6 +12,7 @@
 #include "Common/CommonTypes.h"
 #include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
+#include "Common/MsgHandler.h"
 #include "Common/SDCardUtil.h"
 
 #include "Core/CPUThreadConfigCallback.h"
@@ -20,6 +21,7 @@
 #include "Core/HW/Memmap.h"
 #include "Core/IOS/IOS.h"
 #include "Core/IOS/SDIO/SDStorage.h"
+#include "Core/IOS/SDIO/SDStorageConfig.h"
 #include "Core/IOS/VersionInfo.h"
 #include "Core/System.h"
 
@@ -91,31 +93,62 @@ void SDIOSlot0Device::EventNotify()
   }
 }
 
-void SDIOSlot0Device::OpenInternal()
+SDStorageResult SDIOSlot0Device::OpenInternal()
 {
   const std::string filename = File::GetUserPath(F_WIISDCARDIMAGE_IDX);
-  m_card = CreateSDImageStorage(filename, false);
-  SDStorageResult result = m_card->Open();
-  if (result != SDStorageResult::Success)
+  const Config::WiiSDStorageMode mode = Config::GetWiiSDStorageMode();
+  const std::string physical_device_path =
+      Config::Get(Config::MAIN_WII_SD_PHYSICAL_DEVICE_PATH);
+  auto factory = CreateSDStorageBackendFactory();
+  SDStorageOpenResult open_result = OpenConfiguredSDStorage(
+      mode, filename, physical_device_path, *factory, [&filename] {
+        WARN_LOG_FMT(IOS_SD,
+                     "Failed to open SD Card image, trying to create a new 128 MB image...");
+        const bool created = Common::SDCardCreate(128, filename);
+        if (created)
+          INFO_LOG_FMT(IOS_SD, "Successfully created {}", filename);
+        return created;
+      });
+
+  m_card = std::move(open_result.storage);
+  m_is_raw_storage = open_result.backend_kind == SDStorageBackendKind::PhysicalDeviceReadOnly;
+
+  if (open_result.result == SDStorageResult::Success)
   {
-    WARN_LOG_FMT(IOS_SD, "Failed to open SD Card image, trying to create a new 128 MB image...");
-    if (Common::SDCardCreate(128, filename))
-    {
-      INFO_LOG_FMT(IOS_SD, "Successfully created {}", filename);
-      result = m_card->Open();
-    }
-    if (result != SDStorageResult::Success)
-    {
-      ERROR_LOG_FMT(IOS_SD, "Could not open SD Card image or create a new one, are you running "
-                            "from a read-only directory?");
-    }
+    INFO_LOG_FMT(IOS_SD, "Opened {} SD storage",
+                 m_is_raw_storage ? "read-only physical" : "virtual image");
+    return open_result.result;
   }
+
+  if (!m_is_raw_storage)
+  {
+    ERROR_LOG_FMT(IOS_SD, "Could not open SD Card image or create a new one, are you running "
+                          "from a read-only directory?");
+    return open_result.result;
+  }
+
+  const std::string_view reason = GetPhysicalSDStorageErrorReason(open_result.result);
+  ERROR_LOG_FMT(IOS_SD, "Physical SD Device mode failed for '{}': {}", physical_device_path,
+                reason);
+  CriticalAlertFmt("{}", GetPhysicalSDStorageErrorMessage(physical_device_path, open_result.result));
+  Core::QueueHostJob(&Core::Stop);
+  return open_result.result;
 }
 
 std::optional<IPCReply> SDIOSlot0Device::Open(const OpenRequest& request)
 {
-  OpenInternal();
+  const SDStorageResult result = OpenInternal();
   m_registers.fill(0);
+
+  if (m_is_raw_storage && result != SDStorageResult::Success)
+  {
+    m_is_active = false;
+    if (result == SDStorageResult::PermissionDenied)
+      return IPCReply(IPC_EACCES);
+    if (result == SDStorageResult::NoMedia)
+      return IPCReply(IPC_ENOENT);
+    return IPCReply(IPC_EIO);
+  }
 
   m_is_active = true;
 
@@ -324,7 +357,7 @@ s32 SDIOSlot0Device::ExecuteCommand(const Request& request, u32 buffer_in, u32 b
     INFO_LOG_FMT(IOS_SD, "{}Write {} Block(s) from {:#010x} bsize {} to offset {:#010x}!",
                  req.isDMA ? "DMA " : "", req.blocks, req.addr, req.bsize, req.arg);
 
-    if (!Config::Get(Config::MAIN_ALLOW_SD_WRITES))
+    if (!m_card || IsWriteProtected())
     {
       ERROR_LOG_FMT(IOS_SD, "Write attempted while locked.");
       ret = RET_LOCKED;
@@ -344,17 +377,17 @@ s32 SDIOSlot0Device::ExecuteCommand(const Request& request, u32 buffer_in, u32 b
       const u8* const data = memory.GetPointerForRange(req.addr, size);
 
       const SDStorageResult result =
-          data && m_card ? m_card->Write(address, std::span<const u8>{data, size}) :
-                           SDStorageResult::NoMedia;
+          data ? WriteToSDStorage(*m_card, Config::Get(Config::MAIN_ALLOW_SD_WRITES), address,
+                                  std::span<const u8>{data, size}) :
+                 SDStorageResult::NoMedia;
+      ret = GetSDIOWriteCommandResult(result);
       if (result == SDStorageResult::WriteProtected)
       {
         ERROR_LOG_FMT(IOS_SD, "Write attempted while storage is read-only.");
-        ret = RET_LOCKED;
       }
       else if (result != SDStorageResult::Success)
       {
         ERROR_LOG_FMT(IOS_SD, "Write failed");
-        ret = RET_FAIL;
       }
     }
   }
@@ -492,6 +525,8 @@ std::optional<IPCReply> SDIOSlot0Device::SendCommand(const IOCtlRequest& request
     return std::nullopt;
   }
 
+  // Preserve the legacy plain IOCtl contract: command results are discarded by the outer reply.
+  // Write protection is still enforced inside ExecuteCommand before any backend write can occur.
   return IPCReply(IPC_SUCCESS);
 }
 
@@ -519,7 +554,7 @@ IPCReply SDIOSlot0Device::GetStatus(const IOCtlRequest& request)
   // Evaluate whether a card is currently inserted (config value).
   // Make sure we don't modify m_status so we don't lose track of whether the card is SDHC.
   const bool sd_card_inserted = Config::Get(Config::MAIN_WII_SD_CARD);
-  const bool sd_card_locked = !Config::Get(Config::MAIN_ALLOW_SD_WRITES);
+  const bool sd_card_locked = !m_card || IsWriteProtected();
   const u32 status = sd_card_inserted ?
                          (m_status | CARD_INSERTED | (sd_card_locked ? CARD_LOCKED : 0)) :
                          CARD_NOT_EXIST;
@@ -728,6 +763,12 @@ u64 SDIOSlot0Device::GetAddressFromRequest(u32 arg) const
   if (m_status & CARD_SDHC)
     address *= 512;
   return address;
+}
+
+bool SDIOSlot0Device::IsWriteProtected() const
+{
+  return !m_card ||
+         IsSDStorageWriteProtected(*m_card, Config::Get(Config::MAIN_ALLOW_SD_WRITES));
 }
 
 void SDIOSlot0Device::InitSDHC()

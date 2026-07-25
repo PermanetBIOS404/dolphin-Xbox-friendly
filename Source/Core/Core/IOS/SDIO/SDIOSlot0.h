@@ -19,6 +19,7 @@ class PointerWrap;
 namespace IOS::HLE
 {
 class SDStorage;
+enum class SDStorageResult;
 
 // The front SD slot
 class SDIOSlot0Device : public EmulationDevice
@@ -145,7 +146,8 @@ private:
 
   s32 ExecuteCommand(const Request& request, u32 buffer_in, u32 buffer_in_size, u32 rw_buffer,
                      u32 rw_buffer_size, u32 buffer_out, u32 buffer_out_size);
-  void OpenInternal();
+  SDStorageResult OpenInternal();
+  bool IsWriteProtected() const;
 
   u32 GetOCRegister() const;
 
@@ -171,6 +173,7 @@ private:
   std::array<u32, 0x200 / sizeof(u32)> m_registers{};
 
   std::unique_ptr<SDStorage> m_card;
+  bool m_is_raw_storage = false;
 
   CPUThreadConfigCallback::ConfigChangedCallbackID m_config_callback_id;
   bool m_sd_card_inserted = false;

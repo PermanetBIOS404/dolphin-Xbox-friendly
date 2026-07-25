@@ -202,6 +202,30 @@ const Info<bool>& GetInfoForSimulateKonga(int channel)
   return infos[channel];
 }
 
+const Info<WiiSDStorageMode> MAIN_WII_SD_STORAGE_MODE{
+    {System::Main, "Core", "WiiSDStorageMode"}, WiiSDStorageMode::VirtualSDImage};
+const Info<std::string> MAIN_WII_SD_PHYSICAL_DEVICE_PATH{
+    {System::Main, "Core", "WiiSDPhysicalDevicePath"}, ""};
+
+WiiSDStorageMode ValidateWiiSDStorageMode(WiiSDStorageMode mode)
+{
+  switch (mode)
+  {
+  case WiiSDStorageMode::VirtualSDImage:
+  case WiiSDStorageMode::PhysicalDeviceReadOnly:
+    return mode;
+  default:
+    WARN_LOG_FMT(CORE, "Unknown Wii SD storage mode {}, using the virtual SD image",
+                 static_cast<int>(mode));
+    return WiiSDStorageMode::VirtualSDImage;
+  }
+}
+
+WiiSDStorageMode GetWiiSDStorageMode()
+{
+  return ValidateWiiSDStorageMode(Get(MAIN_WII_SD_STORAGE_MODE));
+}
+
 const Info<bool> MAIN_WII_SD_CARD{{System::Main, "Core", "WiiSDCard"}, true};
 const Info<bool> MAIN_WII_SD_CARD_ENABLE_FOLDER_SYNC{
     {System::Main, "Core", "WiiSDCardEnableFolderSync"}, false};

@@ -548,8 +548,11 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
   const bool delete_savestate =
       boot_session_data.GetDeleteSavestate() == DeleteSavestateAfterBoot::Yes;
 
-  bool sync_sd_folder = system.IsWii() && Config::Get(Config::MAIN_WII_SD_CARD) &&
-                        Config::Get(Config::MAIN_WII_SD_CARD_ENABLE_FOLDER_SYNC);
+  bool sync_sd_folder =
+      system.IsWii() &&
+      Config::GetWiiSDStorageMode() == Config::WiiSDStorageMode::VirtualSDImage &&
+      Config::Get(Config::MAIN_WII_SD_CARD) &&
+      Config::Get(Config::MAIN_WII_SD_CARD_ENABLE_FOLDER_SYNC);
   if (sync_sd_folder)
   {
     sync_sd_folder = Common::SyncSDFolderToSDImage([] { return false; }, Core::WantsDeterminism());

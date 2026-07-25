@@ -440,6 +440,8 @@ add_library(core
   IOS/SDIO/SDIOSlot0.h
   IOS/SDIO/SDStorage.cpp
   IOS/SDIO/SDStorage.h
+  IOS/SDIO/SDStorageConfig.cpp
+  IOS/SDIO/SDStorageConfig.h
   IOS/STM/STM.cpp
   IOS/STM/STM.h
   IOS/USB/Bluetooth/BTBase.cpp

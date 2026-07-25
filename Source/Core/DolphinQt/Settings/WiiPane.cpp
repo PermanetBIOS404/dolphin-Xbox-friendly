@@ -25,12 +25,14 @@
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
+#include "Core/IOS/SDIO/SDStorageConfig.h"
 #include "Core/System.h"
 #include "Core/USBUtils.h"
 
 #include "DolphinQt/Config/ConfigControls/ConfigBool.h"
 #include "DolphinQt/Config/ConfigControls/ConfigChoice.h"
 #include "DolphinQt/Config/ConfigControls/ConfigSlider.h"
+#include "DolphinQt/Config/ConfigControls/ConfigText.h"
 #include "DolphinQt/Config/ConfigControls/ConfigUserPath.h"
 #include "DolphinQt/QtUtils/DolphinFileDialog.h"
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
@@ -98,6 +100,12 @@ void WiiPane::ConnectLayout()
           &WiiPane::OnUSBWhitelistAddButton);
   connect(m_whitelist_usb_remove_button, &QPushButton::clicked, this,
           &WiiPane::OnUSBWhitelistRemoveButton);
+  connect(&Settings::Instance(), &Settings::ConfigChanged, this,
+          &WiiPane::UpdateSDCardControls);
+#if defined(__linux__) && !defined(ANDROID)
+  connect(m_sd_storage_mode_combo, &QComboBox::currentIndexChanged, this,
+          &WiiPane::UpdateSDCardControls);
+#endif
 
   // Emulation State
   connect(&Settings::Instance(), &Settings::EmulationStateChanged, this, [this](Core::State state) {
@@ -178,14 +186,43 @@ void WiiPane::CreateSDCard()
   sd_settings_group_layout->addWidget(m_allow_sd_writes_checkbox, row, 1, 1, 1);
   ++row;
 
+#if defined(__linux__) && !defined(ANDROID)
+  m_sd_storage_mode_combo = new ConfigChoiceMap<Config::WiiSDStorageMode>(
+      {{tr("Virtual SD Image"), Config::WiiSDStorageMode::VirtualSDImage},
+       {tr("Physical SD Device — Read Only"),
+        Config::WiiSDStorageMode::PhysicalDeviceReadOnly}},
+      Config::MAIN_WII_SD_STORAGE_MODE);
+  m_sd_storage_mode_combo->setObjectName(QStringLiteral("sd_storage_mode"));
+  sd_settings_group_layout->addWidget(new QLabel(tr("Storage Mode:")), row, 0);
+  sd_settings_group_layout->addWidget(m_sd_storage_mode_combo, row, 1);
+  ++row;
+
+  m_sd_physical_device_label = new QLabel(tr("Physical Device Path:"));
+  m_sd_physical_device_edit = new ConfigText(Config::MAIN_WII_SD_PHYSICAL_DEVICE_PATH);
+  m_sd_physical_device_edit->setObjectName(QStringLiteral("sd_physical_device_path"));
+  m_sd_physical_device_edit->setPlaceholderText(QStringLiteral("/dev/disk/by-uuid/..."));
+  sd_settings_group_layout->addWidget(m_sd_physical_device_label, row, 0);
+  sd_settings_group_layout->addWidget(m_sd_physical_device_edit, row, 1);
+  ++row;
+
+  m_sd_physical_read_only_warning =
+      new QLabel(tr("Read-only physical device mode: Dolphin will reject every write. The device "
+                    "must be unmounted before emulation starts."));
+  m_sd_physical_read_only_warning->setObjectName(QStringLiteral("sd_physical_read_only_warning"));
+  m_sd_physical_read_only_warning->setWordWrap(true);
+  sd_settings_group_layout->addWidget(m_sd_physical_read_only_warning, row, 0, 1, 2);
+  ++row;
+#endif
+
   {
     QHBoxLayout* hlayout = new QHBoxLayout;
     m_sd_raw_edit = new ConfigUserPath(F_WIISDCARDIMAGE_IDX, Config::MAIN_WII_SD_CARD_IMAGE_PATH);
-    QPushButton* sdcard_open = new NonDefaultQPushButton(QStringLiteral("..."));
-    connect(sdcard_open, &QPushButton::clicked, this, &WiiPane::BrowseSDRaw);
-    hlayout->addWidget(new QLabel(tr("SD Card Path:")));
+    m_sd_raw_open_button = new NonDefaultQPushButton(QStringLiteral("..."));
+    connect(m_sd_raw_open_button, &QPushButton::clicked, this, &WiiPane::BrowseSDRaw);
+    m_sd_raw_label = new QLabel(tr("SD Card Path:"));
+    hlayout->addWidget(m_sd_raw_label);
     hlayout->addWidget(m_sd_raw_edit);
-    hlayout->addWidget(sdcard_open);
+    hlayout->addWidget(m_sd_raw_open_button);
 
     sd_settings_group_layout->addLayout(hlayout, row, 0, 1, 2);
     ++row;
@@ -202,11 +239,13 @@ void WiiPane::CreateSDCard()
     QHBoxLayout* hlayout = new QHBoxLayout;
     m_sd_sync_folder_edit =
         new ConfigUserPath(D_WIISDCARDSYNCFOLDER_IDX, Config::MAIN_WII_SD_CARD_SYNC_FOLDER_PATH);
-    QPushButton* sdcard_open = new NonDefaultQPushButton(QStringLiteral("..."));
-    connect(sdcard_open, &QPushButton::clicked, this, &WiiPane::BrowseSDSyncFolder);
-    hlayout->addWidget(new QLabel(tr("SD Sync Folder:")));
+    m_sd_sync_folder_open_button = new NonDefaultQPushButton(QStringLiteral("..."));
+    connect(m_sd_sync_folder_open_button, &QPushButton::clicked, this,
+            &WiiPane::BrowseSDSyncFolder);
+    m_sd_sync_folder_label = new QLabel(tr("SD Sync Folder:"));
+    hlayout->addWidget(m_sd_sync_folder_label);
     hlayout->addWidget(m_sd_sync_folder_edit);
-    hlayout->addWidget(sdcard_open);
+    hlayout->addWidget(m_sd_sync_folder_open_button);
 
     sd_settings_group_layout->addLayout(hlayout, row, 0, 1, 2);
     ++row;
@@ -217,7 +256,8 @@ void WiiPane::CreateSDCard()
     sd_size_choices.emplace_back(tr(entry.name), entry.size);
 
   m_sd_card_size_combo = new ConfigChoiceMap(sd_size_choices, Config::MAIN_WII_SD_CARD_FILESIZE);
-  sd_settings_group_layout->addWidget(new QLabel(tr("SD Card File Size:")), row, 0);
+  m_sd_card_size_label = new QLabel(tr("SD Card File Size:"));
+  sd_settings_group_layout->addWidget(m_sd_card_size_label, row, 0);
   sd_settings_group_layout->addWidget(m_sd_card_size_combo, row, 1);
   ++row;
 
@@ -274,6 +314,8 @@ void WiiPane::CreateSDCard()
   sd_settings_group_layout->addWidget(m_sd_pack_button, row, 0, 1, 1);
   sd_settings_group_layout->addWidget(m_sd_unpack_button, row, 1, 1, 1);
   ++row;
+
+  UpdateSDCardControls();
 }
 
 void WiiPane::CreateWhitelistedUSBPassthroughDevices()
@@ -332,18 +374,50 @@ void WiiPane::CreateWiiRemoteSettings()
 
 void WiiPane::OnEmulationStateChanged(bool running)
 {
+  m_is_running = running;
   m_screensaver_checkbox->setEnabled(!running);
   m_pal60_mode_checkbox->setEnabled(!running);
   m_system_language_choice->setEnabled(!running);
   m_aspect_ratio_choice->setEnabled(!running);
   m_sound_mode_choice->setEnabled(!running);
-  m_sd_pack_button->setEnabled(!running);
-  m_sd_unpack_button->setEnabled(!running);
+  UpdateSDCardControls();
   m_wiimote_motor->setEnabled(!running);
   m_wiimote_speaker_volume->setEnabled(!running);
   m_wiimote_ir_sensitivity->setEnabled(!running);
   m_wiimote_ir_sensor_position->setEnabled(!running);
   m_wiilink_checkbox->setEnabled(!running);
+}
+
+void WiiPane::UpdateSDCardControls()
+{
+  IOS::HLE::SDStorageModeControlState mode_state{
+      .image_controls_enabled = true,
+      .physical_path_enabled = false,
+      .read_only_warning_visible = false,
+  };
+#if defined(__linux__) && !defined(ANDROID)
+  mode_state = IOS::HLE::GetSDStorageModeControlState(Config::GetWiiSDStorageMode());
+  m_sd_storage_mode_combo->setEnabled(!m_is_running);
+  m_sd_physical_device_label->setVisible(mode_state.physical_path_enabled);
+  m_sd_physical_device_edit->setVisible(mode_state.physical_path_enabled);
+  m_sd_physical_device_label->setEnabled(!m_is_running && mode_state.physical_path_enabled);
+  m_sd_physical_device_edit->setEnabled(!m_is_running && mode_state.physical_path_enabled);
+  m_sd_physical_read_only_warning->setVisible(mode_state.read_only_warning_visible);
+#endif
+
+  const bool image_controls_enabled = !m_is_running && mode_state.image_controls_enabled;
+  m_allow_sd_writes_checkbox->setEnabled(image_controls_enabled);
+  m_sd_raw_label->setEnabled(image_controls_enabled);
+  m_sd_raw_edit->setEnabled(image_controls_enabled);
+  m_sd_raw_open_button->setEnabled(image_controls_enabled);
+  m_sync_sd_folder_checkbox->setEnabled(image_controls_enabled);
+  m_sd_sync_folder_label->setEnabled(image_controls_enabled);
+  m_sd_sync_folder_edit->setEnabled(image_controls_enabled);
+  m_sd_sync_folder_open_button->setEnabled(image_controls_enabled);
+  m_sd_card_size_label->setEnabled(image_controls_enabled);
+  m_sd_card_size_combo->setEnabled(image_controls_enabled);
+  m_sd_pack_button->setEnabled(image_controls_enabled);
+  m_sd_unpack_button->setEnabled(image_controls_enabled);
 }
 
 void WiiPane::ValidateSelectionState()

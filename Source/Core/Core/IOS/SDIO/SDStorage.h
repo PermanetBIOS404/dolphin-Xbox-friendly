@@ -19,7 +19,9 @@ enum class SDStorageResult
   OutOfRange,
   Busy,
   PermissionDenied,
+  NotBlockDevice,
   UnsupportedSectorSize,
+  UnsupportedPlatform,
   IoError,
 };
 

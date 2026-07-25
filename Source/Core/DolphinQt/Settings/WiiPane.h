@@ -7,11 +7,17 @@
 
 #include "Common/CommonTypes.h"
 
+namespace Config
+{
+enum class WiiSDStorageMode : int;
+}
+
 class ConfigBool;
 template <typename T>
 class ConfigChoiceMap;
 class ConfigChoiceU32;
 class ConfigSliderU32;
+class ConfigText;
 class ConfigUserPath;
 class QLabel;
 class QListWidget;
@@ -33,6 +39,7 @@ private:
   void CreateSDCard();
   void CreateWhitelistedUSBPassthroughDevices();
   void CreateWiiRemoteSettings();
+  void UpdateSDCardControls();
 
   void OnEmulationStateChanged(bool running);
 
@@ -66,8 +73,20 @@ private:
   ConfigChoiceMap<u64>* m_sd_card_size_combo;
   ConfigUserPath* m_sd_raw_edit;
   ConfigUserPath* m_sd_sync_folder_edit;
+  QLabel* m_sd_raw_label;
+  QLabel* m_sd_sync_folder_label;
+  QLabel* m_sd_card_size_label;
+  QPushButton* m_sd_raw_open_button;
+  QPushButton* m_sd_sync_folder_open_button;
   QPushButton* m_sd_pack_button;
   QPushButton* m_sd_unpack_button;
+#if defined(__linux__) && !defined(ANDROID)
+  ConfigChoiceMap<Config::WiiSDStorageMode>* m_sd_storage_mode_combo;
+  ConfigText* m_sd_physical_device_edit;
+  QLabel* m_sd_physical_device_label;
+  QLabel* m_sd_physical_read_only_warning;
+#endif
+  bool m_is_running = false;
 
   // Whitelisted USB Passthrough Devices
   QListWidget* m_whitelist_usb_list;
