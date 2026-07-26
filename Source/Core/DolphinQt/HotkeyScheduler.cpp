@@ -230,6 +230,9 @@ void HotkeyScheduler::Run()
       if (IsHotkey(HK_RESET))
         emit ResetHotkey();
 
+      if (IsHotkey(HK_OPEN_QUICK_MENU))
+        emit OpenQuickMenu();
+
       // Frame advance
       HandleFrameStepHotkeys();
 
@@ -298,6 +301,9 @@ void HotkeyScheduler::Run()
           Settings::Instance().SetWiiSpeakMuted(muted);
           OSD::AddMessage(muted ? "Wii Speak muted" : "Wii Speak unmuted");
         }
+
+        if (IsHotkey(HK_RESTORE_WII_POINTER))
+          emit RestoreWiiPointer();
       }
 
       if (IsHotkey(HK_PREV_WIIMOTE_PROFILE_1))

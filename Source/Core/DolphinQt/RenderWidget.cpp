@@ -17,13 +17,17 @@
 #include <QTimer>
 #include <QWindow>
 
+#include "Common/Logging/Log.h"
+#include "Common/WindowSystemInfo.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
+#include "Core/Host.h"
 #include "Core/HW/Wiimote.h"
 #include "Core/State.h"
 #include "Core/System.h"
 
 #include "DolphinQt/Host.h"
+#include "DolphinQt/QuickMenu.h"
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 #include "DolphinQt/Resources.h"
 #include "DolphinQt/Settings.h"
@@ -37,6 +41,20 @@
 #include <dwmapi.h>
 #endif
 
+static const char* GetPointerRecoveryTriggerName(Wiimote::PointerRecoveryTrigger trigger)
+{
+  switch (trigger)
+  {
+  case Wiimote::PointerRecoveryTrigger::Manual:
+    return "manual";
+  case Wiimote::PointerRecoveryTrigger::FocusRegained:
+    return "focus-regain";
+  case Wiimote::PointerRecoveryTrigger::InitialActivation:
+    return "initial-activation";
+  }
+  return "unknown";
+}
+
 RenderWidget::RenderWidget(QWidget* parent) : QWidget(parent)
 {
   setWindowTitle(QStringLiteral("Dolphin"));
@@ -48,7 +66,12 @@ RenderWidget::RenderWidget(QWidget* parent) : QWidget(parent)
   p.setColor(QPalette::Window, Qt::black);
   setPalette(p);
 
+  m_quick_menu = new QuickMenu(this);
+  connect(m_quick_menu, &QuickMenu::ActionRequested, this, &RenderWidget::CloseQuickMenu);
+
   connect(Host::GetInstance(), &Host::RequestTitle, this, &RenderWidget::setWindowTitle);
+  connect(Host::GetInstance(), &Host::WiiPointerRecoveryRequested, this,
+          &RenderWidget::RequestWiiPointerRecovery);
   connect(Host::GetInstance(), &Host::RequestRenderSize, this, [this](int w, int h) {
     if (!Config::Get(Config::MAIN_RENDER_WINDOW_AUTOSIZE) || isFullScreen() || isMaximized())
       return;
@@ -60,7 +83,25 @@ RenderWidget::RenderWidget(QWidget* parent) : QWidget(parent)
 
   connect(&Settings::Instance(), &Settings::EmulationStateChanged, this, [this](Core::State state) {
     if (state == Core::State::Running)
+    {
       SetPresenterKeyMap();
+      if (m_initial_pointer_activation.RequestOnce())
+      {
+        INFO_LOG_FMT(WIIMOTE,
+                     "Scheduling one-time absolute Wii pointer activation after emulation start");
+        RequestWiiPointerRecovery(Wiimote::PointerRecoveryTrigger::InitialActivation);
+      }
+    }
+    else if (state == Core::State::Starting || state == Core::State::Uninitialized)
+    {
+      m_initial_pointer_activation.Reset();
+      m_wii_pointer_recovery_pending = false;
+      m_wii_pointer_recovery_manual = false;
+      m_wii_pointer_recovery_initial = false;
+      m_mouse_reconnect_request.Clear();
+      if (m_quick_menu_session.IsOpen())
+        CloseQuickMenu(QuickMenuAction::Resume);
+    }
   });
 
   // We have to use Qt::DirectConnection here because we don't want those signals to get queued
@@ -93,6 +134,202 @@ RenderWidget::RenderWidget(QWidget* parent) : QWidget(parent)
   // We need a native window to render into.
   setAttribute(Qt::WA_NativeWindow);
   setAttribute(Qt::WA_PaintOnScreen);
+}
+
+RenderWidget::~RenderWidget()
+{
+  if (m_quick_menu_session.IsOpen())
+    Host::GetInstance()->SetQuickMenuOpen(false);
+}
+
+void RenderWidget::RequestWiiPointerRecovery(Wiimote::PointerRecoveryTrigger trigger)
+{
+  if (trigger == Wiimote::PointerRecoveryTrigger::FocusRegained &&
+      !Wiimote::HasMousePointerRecoveryEligibleController())
+  {
+    return;
+  }
+
+  const bool already_pending = m_wii_pointer_recovery_pending;
+  m_wii_pointer_recovery_pending = true;
+  m_wii_pointer_recovery_manual |= trigger == Wiimote::PointerRecoveryTrigger::Manual;
+  m_wii_pointer_recovery_initial |= trigger == Wiimote::PointerRecoveryTrigger::InitialActivation;
+
+  INFO_LOG_FMT(WIIMOTE,
+               "Wii pointer recovery requested on Qt thread: trigger={}, coalesced={}, "
+               "active_modal={}, render_active={}, render_has_focus={}, host_renderer_focus={}",
+               GetPointerRecoveryTriggerName(trigger), already_pending,
+               QApplication::activeModalWidget() != nullptr, isActiveWindow(), hasFocus(),
+               Host_RendererHasFocus());
+  QueueWiiPointerRecovery();
+}
+
+void RenderWidget::RequestMouseInputReconnect()
+{
+  const bool new_request = m_mouse_reconnect_request.Request();
+  m_wii_pointer_recovery_pending = true;
+  m_wii_pointer_recovery_manual = true;
+  INFO_LOG_FMT(WIIMOTE, "Mouse reconnect requested on Qt thread: coalesced={}", !new_request);
+  QueueWiiPointerRecovery();
+}
+
+void RenderWidget::RestoreFocusAndRequestWiiPointerRecovery(
+    Wiimote::PointerRecoveryTrigger trigger)
+{
+  QTimer::singleShot(0, this, [this, trigger] {
+    window()->activateWindow();
+    raise();
+    setFocus(Qt::OtherFocusReason);
+    INFO_LOG_FMT(WIIMOTE,
+                 "Render focus restoration requested: render_has_focus={}, "
+                 "host_renderer_focus={}, active_modal={}",
+                 hasFocus(), Host_RendererHasFocus(),
+                 QApplication::activeModalWidget() != nullptr);
+    RequestWiiPointerRecovery(trigger);
+  });
+}
+
+void RenderWidget::ToggleQuickMenu()
+{
+  if (m_quick_menu_session.IsOpen())
+  {
+    CloseQuickMenu(QuickMenuAction::Resume);
+    return;
+  }
+
+  const Core::State state = Core::GetState(Core::System::GetInstance());
+  if (state == Core::State::Uninitialized || state == Core::State::Stopping)
+    return;
+
+  const bool resume_on_close = state == Core::State::Running;
+  if (!m_quick_menu_session.Open(resume_on_close))
+    return;
+
+  SetCursorLocked(false);
+  Host::GetInstance()->SetQuickMenuOpen(true);
+  if (resume_on_close)
+    Core::SetState(Core::System::GetInstance(), Core::State::Paused);
+
+  m_quick_menu->Open();
+  INFO_LOG_FMT(WIIMOTE, "Dolphin Quick Menu opened: emulation_paused={}", resume_on_close);
+}
+
+bool RenderWidget::IsQuickMenuOpen() const
+{
+  return m_quick_menu_session.IsOpen();
+}
+
+void RenderWidget::CloseQuickMenu(QuickMenuAction action)
+{
+  const std::optional<QuickMenuAction> closed_action = m_quick_menu_session.Close(action);
+  if (!closed_action)
+    return;
+
+  m_quick_menu->Close();
+  Host::GetInstance()->SetQuickMenuOpen(false);
+
+  if (m_quick_menu_session.ShouldResumeEmulationOnClose() &&
+      Core::GetState(Core::System::GetInstance()) == Core::State::Paused)
+  {
+    Core::SetState(Core::System::GetInstance(), Core::State::Running);
+  }
+
+  INFO_LOG_FMT(WIIMOTE, "Dolphin Quick Menu closed; scheduling render-focus restoration");
+  QTimer::singleShot(0, this, [this, action = *closed_action] {
+    window()->activateWindow();
+    raise();
+    setFocus(Qt::OtherFocusReason);
+    INFO_LOG_FMT(WIIMOTE,
+                 "Quick Menu render focus restored: render_has_focus={}, "
+                 "host_renderer_focus={}, active_modal={}",
+                 hasFocus(), Host_RendererHasFocus(),
+                 QApplication::activeModalWidget() != nullptr);
+
+    switch (action)
+    {
+    case QuickMenuAction::Resume:
+      break;
+    case QuickMenuAction::RestoreWiiPointer:
+      INFO_LOG_FMT(WIIMOTE, "Wii pointer recovery requested from Dolphin Quick Menu");
+      Host::GetInstance()->RequestWiiPointerRecovery(
+          Wiimote::PointerRecoveryEntryPoint::QuickMenu);
+      break;
+    case QuickMenuAction::ReconnectMouseInput:
+      INFO_LOG_FMT(WIIMOTE, "Mouse input reconnect requested from Dolphin Quick Menu");
+      RequestMouseInputReconnect();
+      break;
+    case QuickMenuAction::OpenControllerSettings:
+      emit QuickMenuControllerSettingsRequested();
+      break;
+    case QuickMenuAction::StopEmulation:
+      emit QuickMenuStopRequested();
+      break;
+    }
+  });
+}
+
+void RenderWidget::QueueWiiPointerRecovery()
+{
+  if (m_wii_pointer_recovery_queued)
+    return;
+
+  m_wii_pointer_recovery_queued = true;
+  QTimer::singleShot(0, this, [this] {
+    m_wii_pointer_recovery_queued = false;
+    TryWiiPointerRecovery();
+  });
+}
+
+void RenderWidget::TryWiiPointerRecovery()
+{
+  if (!m_wii_pointer_recovery_pending)
+    return;
+
+  const WindowSystemInfo wsi = g_controller_interface.GetWindowSystemInfo();
+  const bool render_has_focus = hasFocus();
+  QWindow* const render_window_handle = window()->windowHandle();
+  const void* const render_window =
+      render_window_handle ? reinterpret_cast<void*>(render_window_handle->winId()) : nullptr;
+  const bool input_backend_valid =
+      g_controller_interface.IsInit() && wsi.render_window != nullptr &&
+      (wsi.type != WindowSystemType::X11 || wsi.render_window == render_window);
+  const Wiimote::PointerRecoveryReadiness readiness{
+      .no_active_modal = QApplication::activeModalWidget() == nullptr,
+      .render_widget_focused = render_has_focus,
+      .host_renderer_focused = Host_RendererHasFocus(),
+      .input_backend_valid = input_backend_valid,
+  };
+
+  if (!Wiimote::IsPointerRecoveryReady(readiness))
+  {
+    INFO_LOG_FMT(WIIMOTE,
+                 "Wii pointer recovery deferred on Qt thread: active_modal={}, render_active={}, "
+                 "render_has_focus={}, host_renderer_focus={}, input_backend_valid={}, "
+                 "backend_window={}, render_window={}",
+                 !readiness.no_active_modal, isActiveWindow(), render_has_focus,
+                 readiness.host_renderer_focused, readiness.input_backend_valid, wsi.render_window,
+                 render_window);
+    return;
+  }
+
+  const auto trigger =
+      m_wii_pointer_recovery_manual ?
+          Wiimote::PointerRecoveryTrigger::Manual :
+          (m_wii_pointer_recovery_initial ? Wiimote::PointerRecoveryTrigger::InitialActivation :
+                                            Wiimote::PointerRecoveryTrigger::FocusRegained);
+  m_wii_pointer_recovery_pending = false;
+  m_wii_pointer_recovery_manual = false;
+  m_wii_pointer_recovery_initial = false;
+  const bool reconnect = m_mouse_reconnect_request.Consume();
+  const unsigned int recovery_count =
+      reconnect ? Wiimote::ReconnectMouseInput() : Wiimote::RestoreMousePointers(trigger);
+  if (recovery_count != 0)
+    m_initial_pointer_activation.Complete();
+  INFO_LOG_FMT(WIIMOTE,
+               "Wii pointer recovery prepared after modal/focus/backend checks: trigger={}, "
+               "eligible_remotes={}; controller-thread input gate will authorize execution",
+               reconnect ? "mouse-reconnect" : GetPointerRecoveryTriggerName(trigger),
+               recovery_count);
 }
 
 QPaintEngine* RenderWidget::paintEngine() const
@@ -355,6 +592,8 @@ void RenderWidget::SetWaitingForMessageBox(bool waiting_for_message_box)
     }
     m_lock_cursor_on_next_activation = false;
   }
+  if (!m_waiting_for_message_box && m_wii_pointer_recovery_pending)
+    QueueWiiPointerRecovery();
 }
 
 bool RenderWidget::event(QEvent* event)
@@ -363,6 +602,10 @@ bool RenderWidget::event(QEvent* event)
 
   switch (event->type())
   {
+  case QEvent::FocusIn:
+    if (m_wii_pointer_recovery_pending)
+      QueueWiiPointerRecovery();
+    break;
   case QEvent::KeyPress:
   {
     QKeyEvent* ke = static_cast<QKeyEvent*>(event);
@@ -443,7 +686,13 @@ bool RenderWidget::event(QEvent* event)
     }
 
     emit FocusChanged(true);
+    INFO_LOG_FMT(WIIMOTE,
+                 "RenderWidget WindowActivate: active_modal={}, waiting_for_message_box={}, "
+                 "render_active={}, render_has_focus={}, host_renderer_focus={}",
+                 QApplication::activeModalWidget() != nullptr, m_waiting_for_message_box,
+                 isActiveWindow(), hasFocus(), Host_RendererHasFocus());
     Wiimote::HandleRendererFocusChanged(true);
+    RequestWiiPointerRecovery(Wiimote::PointerRecoveryTrigger::FocusRegained);
     break;
   case QEvent::WindowDeactivate:
     SetCursorLocked(false);
@@ -464,6 +713,11 @@ bool RenderWidget::event(QEvent* event)
     }
 
     emit FocusChanged(false);
+    INFO_LOG_FMT(WIIMOTE,
+                 "RenderWidget WindowDeactivate: active_modal={}, waiting_for_message_box={}, "
+                 "render_active={}, render_has_focus={}, host_renderer_focus={}",
+                 QApplication::activeModalWidget() != nullptr, m_waiting_for_message_box,
+                 isActiveWindow(), hasFocus(), Host_RendererHasFocus());
     Wiimote::HandleRendererFocusChanged(false);
     break;
   case QEvent::Move:

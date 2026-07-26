@@ -32,6 +32,7 @@ signals:
   void FullScreenHotkey();
   void StopHotkey();
   void ResetHotkey();
+  void OpenQuickMenu();
   void TogglePauseHotkey();
   void ScreenShotHotkey();
   void RefreshGameListHotkey();
@@ -53,6 +54,7 @@ signals:
   void ExportRecording();
   void ToggleReadOnlyMode();
   void ConnectWiiRemote(int id);
+  void RestoreWiiPointer();
 #ifdef USE_RETRO_ACHIEVEMENTS
   void OpenAchievements();
 #endif  // USE_RETRO_ACHIEVEMENTS

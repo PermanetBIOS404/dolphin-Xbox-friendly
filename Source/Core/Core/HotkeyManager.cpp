@@ -35,6 +35,7 @@ constexpr std::array<const char*, NUM_HOTKEYS> s_hotkey_labels{{
     _trans("Center Mouse"),
     _trans("Activate NetPlay Chat"),
     _trans("Control NetPlay Golf Mode"),
+    _trans("Open Dolphin Quick Menu"),
 #ifdef USE_RETRO_ACHIEVEMENTS
     _trans("Open Achievements"),
 #endif  // USE_RETRO_ACHIEVEMENTS
@@ -86,6 +87,7 @@ constexpr std::array<const char*, NUM_HOTKEYS> s_hotkey_labels{{
     _trans("Toggle SD Card"),
     _trans("Toggle USB Keyboard"),
     _trans("Toggle Wii Speak Mute"),
+    _trans("Restore Wii Pointer"),
 
     _trans("Next Profile"),
     _trans("Previous Profile"),
@@ -296,7 +298,7 @@ constexpr std::array<HotkeyGroupInfo, NUM_HOTKEY_GROUPS> s_groups_info = {
 #ifdef USE_RETRO_ACHIEVEMENTS
     {{_trans("General"), HK_OPEN, HK_OPEN_ACHIEVEMENTS},
 #else   // USE_RETRO_ACHIEVEMENTS
-    {{_trans("General"), HK_OPEN, HK_REQUEST_GOLF_CONTROL},
+    {{_trans("General"), HK_OPEN, HK_OPEN_QUICK_MENU},
 #endif  // USE_RETRO_ACHIEVEMENTS
      {_trans("Volume"), HK_VOLUME_DOWN, HK_VOLUME_TOGGLE_MUTE},
      {_trans("Emulation Speed"), HK_DECREASE_EMULATION_SPEED, HK_TOGGLE_THROTTLE},
@@ -305,7 +307,7 @@ constexpr std::array<HotkeyGroupInfo, NUM_HOTKEY_GROUPS> s_groups_info = {
      {_trans("Stepping"), HK_STEP, HK_SKIP},
      {_trans("Program Counter"), HK_SHOW_PC, HK_SET_PC},
      {_trans("Breakpoint"), HK_BP_TOGGLE, HK_MBP_ADD},
-     {_trans("Wii"), HK_TRIGGER_SYNC_BUTTON, HK_TOGGLE_WII_SPEAK_MUTE},
+     {_trans("Wii"), HK_TRIGGER_SYNC_BUTTON, HK_RESTORE_WII_POINTER},
      {_trans("Controller Profile 1"), HK_NEXT_WIIMOTE_PROFILE_1, HK_PREV_GAME_WIIMOTE_PROFILE_1},
      {_trans("Controller Profile 2"), HK_NEXT_WIIMOTE_PROFILE_2, HK_PREV_GAME_WIIMOTE_PROFILE_2},
      {_trans("Controller Profile 3"), HK_NEXT_WIIMOTE_PROFILE_3, HK_PREV_GAME_WIIMOTE_PROFILE_3},
@@ -424,11 +426,17 @@ void HotkeyManager::LoadDefaults(const ControllerInterface& ciface)
   set_key_expression(HK_STEP_OUT, hotkey_string({"Shift", "F11"}));
   set_key_expression(HK_BP_TOGGLE, hotkey_string({"Shift", "F9"}));
   set_key_expression(HK_SCREENSHOT, "F9");
+  // Shift+Tab is commonly captured by Steam. Ctrl+Shift+Space is otherwise unused in Dolphin's
+  // default hotkey table and does not require a function key.
+  set_key_expression(HK_OPEN_QUICK_MENU, hotkey_string({"Ctrl", "Shift", "Space"}));
   set_key_expression(HK_WIIMOTE1_CONNECT, hotkey_string({"Alt", "F5"}));
   set_key_expression(HK_WIIMOTE2_CONNECT, hotkey_string({"Alt", "F6"}));
   set_key_expression(HK_WIIMOTE3_CONNECT, hotkey_string({"Alt", "F7"}));
   set_key_expression(HK_WIIMOTE4_CONNECT, hotkey_string({"Alt", "F8"}));
   set_key_expression(HK_BALANCEBOARD_CONNECT, hotkey_string({"Alt", "F9"}));
+  // Ctrl+Shift+R is already GBA Reset. Use an otherwise unused ordinary-key combination so this
+  // action remains accessible on keyboards that require Fn for function keys.
+  set_key_expression(HK_RESTORE_WII_POINTER, hotkey_string({"Ctrl", "Shift", "P"}));
 #ifdef _WIN32
   set_key_expression(HK_TOGGLE_THROTTLE, "TAB");
 #else

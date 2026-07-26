@@ -20,6 +20,11 @@ void InputBackend::HandleWindowChange()
 {
 }
 
+bool InputBackend::ReconnectWindowInput()
+{
+  return false;
+}
+
 ControllerInterface& InputBackend::GetControllerInterface()
 {
   return m_controller_interface;

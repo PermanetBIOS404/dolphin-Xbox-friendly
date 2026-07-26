@@ -127,6 +127,8 @@ void MenuBar::OnEmulationStateChanged(Core::State state)
   m_reset_action->setEnabled(running);
   m_fullscreen_action->setEnabled(running);
   m_screenshot_action->setEnabled(running);
+  m_quick_menu_action->setEnabled(running);
+  m_restore_wii_pointer_action->setEnabled(running);
   m_state_save_menu->setEnabled(running);
 
   const bool hardcore = AchievementManager::GetInstance().IsHardcoreModeActive();
@@ -394,6 +396,10 @@ void MenuBar::AddEmulationMenu()
   m_frame_advance_action = emu_menu->addAction(tr("&Frame Advance"), this, &MenuBar::FrameAdvance);
 
   m_screenshot_action = emu_menu->addAction(tr("Take Screenshot"), this, &MenuBar::Screenshot);
+  m_quick_menu_action =
+      emu_menu->addAction(tr("Dolphin Quick Menu"), this, &MenuBar::OpenQuickMenu);
+  m_restore_wii_pointer_action =
+      emu_menu->addAction(tr("Restore Wii Pointer"), this, &MenuBar::RestoreWiiPointer);
 
   emu_menu->addSeparator();
 

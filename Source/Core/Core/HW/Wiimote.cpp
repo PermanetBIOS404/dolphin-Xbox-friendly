@@ -32,6 +32,8 @@ static std::array<u8, MAX_BBMOTES> s_last_connect_request_counter;
 namespace
 {
 static std::array<std::atomic<WiimoteSource>, MAX_BBMOTES> s_wiimote_sources;
+static std::array<Wiimote::PointerRecoveryRequest, MAX_WIIMOTES> s_pointer_recovery_requests;
+static std::array<std::atomic<bool>, MAX_WIIMOTES> s_pointer_recovery_gate_logged;
 static std::optional<Config::ConfigChangedCallbackID> s_config_callback_id = std::nullopt;
 
 WiimoteSource GetSource(unsigned int index)
@@ -101,6 +103,99 @@ namespace Wiimote
 {
 static InputConfig s_config(WIIMOTE_INI_NAME, _trans("Wii Remote"), "Wiimote", "Wiimote");
 
+static const char* GetPointerRecoveryTriggerName(PointerRecoveryTrigger trigger)
+{
+  switch (trigger)
+  {
+  case PointerRecoveryTrigger::Manual:
+    return "Manual";
+  case PointerRecoveryTrigger::FocusRegained:
+    return "Focus-regain";
+  case PointerRecoveryTrigger::InitialActivation:
+    return "Initial-activation";
+  }
+  return "Unknown";
+}
+
+bool IsPointerRecoveryReady(const PointerRecoveryReadiness& readiness)
+{
+  return readiness.no_active_modal && readiness.render_widget_focused &&
+         readiness.host_renderer_focused && readiness.input_backend_valid;
+}
+
+PointerRecoveryTrigger GetPointerRecoveryTriggerForEntryPoint(PointerRecoveryEntryPoint entry_point)
+{
+  switch (entry_point)
+  {
+  case PointerRecoveryEntryPoint::SettingsButton:
+  case PointerRecoveryEntryPoint::MainMenu:
+  case PointerRecoveryEntryPoint::Hotkey:
+  case PointerRecoveryEntryPoint::QuickMenu:
+    return PointerRecoveryTrigger::Manual;
+  }
+
+  return PointerRecoveryTrigger::Manual;
+}
+
+bool PointerRecoveryRequest::Request()
+{
+  return !m_pending.exchange(true);
+}
+
+PointerRecoveryRuntimeResult PointerRecoveryRequest::TryConsume(bool input_gate_open)
+{
+  if (!m_pending.load())
+    return PointerRecoveryRuntimeResult::NoRequest;
+  if (!input_gate_open)
+    return PointerRecoveryRuntimeResult::DeferredByInputGate;
+  return m_pending.exchange(false) ? PointerRecoveryRuntimeResult::Executed :
+                                     PointerRecoveryRuntimeResult::NoRequest;
+}
+
+void PointerRecoveryRequest::Clear()
+{
+  m_pending.store(false);
+}
+
+bool PointerInitialActivation::RequestOnce()
+{
+  return !m_started.exchange(true);
+}
+
+void PointerInitialActivation::Complete()
+{
+  m_started.store(true);
+}
+
+void PointerInitialActivation::Reset()
+{
+  m_started.store(false);
+}
+
+PointerRecoveryRuntimeResult TryConsumeMousePointerRecovery(unsigned int index,
+                                                            bool input_gate_open)
+{
+  if (index >= MAX_WIIMOTES)
+    return PointerRecoveryRuntimeResult::NoRequest;
+
+  const auto result = s_pointer_recovery_requests[index].TryConsume(input_gate_open);
+  if (result == PointerRecoveryRuntimeResult::DeferredByInputGate)
+  {
+    if (!s_pointer_recovery_gate_logged[index].exchange(true))
+    {
+      INFO_LOG_FMT(WIIMOTE,
+                   "Wii pointer recovery for remote {} deferred on controller thread: input "
+                   "gate remains closed",
+                   index + 1);
+    }
+  }
+  else if (result == PointerRecoveryRuntimeResult::Executed)
+  {
+    s_pointer_recovery_gate_logged[index].store(false);
+  }
+  return result;
+}
+
 InputConfig* GetConfig()
 {
   return &s_config;
@@ -163,6 +258,12 @@ ControllerEmu::ControlGroup* GetShinkansenGroup(int number, WiimoteEmu::Shinkans
 
 void Shutdown()
 {
+  for (unsigned int index = 0; index < MAX_WIIMOTES; ++index)
+  {
+    s_pointer_recovery_requests[index].Clear();
+    s_pointer_recovery_gate_logged[index].store(false);
+  }
+
   s_config.UnregisterHotplugCallback();
 
   s_config.ClearControllers();
@@ -178,6 +279,12 @@ void Shutdown()
 
 void Initialize(InitializeMode init_mode)
 {
+  for (unsigned int index = 0; index < MAX_WIIMOTES; ++index)
+  {
+    s_pointer_recovery_requests[index].Clear();
+    s_pointer_recovery_gate_logged[index].store(false);
+  }
+
   if (s_config.ControllersNeedToBeCreated())
   {
     for (unsigned int i = WIIMOTE_CHAN_0; i < MAX_BBMOTES; ++i)
@@ -255,7 +362,8 @@ PointerRecoveryResult RestoreMousePointer(unsigned int index, PointerRecoveryTri
 
   auto* const wiimote =
       static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(static_cast<int>(index)));
-  const std::optional<std::string> mouse_device = wiimote->GetMousePointerDevice();
+  std::optional<std::string> mouse_device =
+      wiimote->ResolveEffectiveMousePointerDevice(g_controller_interface);
   if (!mouse_device)
   {
     INFO_LOG_FMT(WIIMOTE,
@@ -264,44 +372,110 @@ PointerRecoveryResult RestoreMousePointer(unsigned int index, PointerRecoveryTri
     return PointerRecoveryResult::NotConfigured;
   }
 
-  // Recreate only input backends tied to the render window. For XInput2 this replaces a context
-  // whose raw-event stream stopped after focus loss. Device-change callbacks rebind all existing
-  // expressions, and this explicit update makes the selected remote immediately consistent.
-  g_controller_interface.RefreshDevices(ControllerInterface::RefreshReason::WindowChangeOnly);
+  // Do not rebuild the window input backend for a normal restore. Reconnect Mouse Input owns that
+  // deeper lifecycle. Updating references here is harmless and ensures a previous reconnect is
+  // visible before the runtime reset reaches the emulation input thread.
   wiimote->UpdateReferences(g_controller_interface);
+  mouse_device = wiimote->ResolveEffectiveMousePointerDevice(g_controller_interface);
+  if (!mouse_device)
+  {
+    WARN_LOG_FMT(WIIMOTE,
+                 "Wii pointer recovery failed for remote {}: effective mouse device disappeared "
+                 "during window-backend refresh",
+                 index + 1);
+    return PointerRecoveryResult::Unavailable;
+  }
   INFO_LOG_FMT(WIIMOTE, "Refreshed window input device and Wii pointer references for remote {}",
                index + 1);
 
-  if (trigger == PointerRecoveryTrigger::Manual)
-  {
-    g_controller_interface.SetMouseCenteringRequested(true);
-  }
-
   g_controller_interface.RequestMouseCursorRefresh();
-  wiimote->ResetPointerState();
+  const bool new_request = s_pointer_recovery_requests[index].Request();
+  if (new_request)
+    s_pointer_recovery_gate_logged[index].store(false);
 
   INFO_LOG_FMT(WIIMOTE,
-               "{} Wii pointer recovery for remote {} using mouse device '{}'; runtime Point "
-               "state reset and absolute cursor refresh requested",
-               trigger == PointerRecoveryTrigger::Manual ? "Manual" : "Focus-regain", index + 1,
-               *mouse_device);
-  return PointerRecoveryResult::Restored;
+               "{} Wii pointer recovery requested for remote {} using mouse device '{}'; "
+               "absolute cursor refresh prepared and runtime Point reset {}",
+               GetPointerRecoveryTriggerName(trigger), index + 1, *mouse_device,
+               new_request ? "queued" : "already pending");
+  return PointerRecoveryResult::Queued;
+}
+
+unsigned int RestoreMousePointers(PointerRecoveryTrigger trigger)
+{
+  unsigned int recovery_count = 0;
+  for (unsigned int index = 0; index < MAX_WIIMOTES; ++index)
+  {
+    if (RestoreMousePointer(index, trigger) == PointerRecoveryResult::Queued)
+      ++recovery_count;
+  }
+  return recovery_count;
+}
+
+unsigned int ReconnectMouseInput()
+{
+  if (!HasMousePointerRecoveryEligibleController())
+  {
+    INFO_LOG_FMT(WIIMOTE,
+                 "Mouse input reconnect ignored: no emulated absolute mouse Wii pointer is active");
+    return 0;
+  }
+
+  const WindowSystemInfo wsi = g_controller_interface.GetWindowSystemInfo();
+  INFO_LOG_FMT(WIIMOTE, "Mouse input reconnect requested for render window {}", wsi.render_window);
+  if (!g_controller_interface.ReconnectWindowInput())
+  {
+    WARN_LOG_FMT(WIIMOTE,
+                 "Mouse input reconnect failed: no window-bound input backend handled the request");
+    return 0;
+  }
+
+  // The backend reconnect's devices-changed callback refreshes every controller reference. The
+  // restore pass verifies qualified and default-device Cursor mappings against the new device,
+  // requests an absolute position query, and queues Point reset for the open input gate.
+  const unsigned int recovery_count = RestoreMousePointers(PointerRecoveryTrigger::Manual);
+  INFO_LOG_FMT(WIIMOTE,
+               "Mouse input reconnect completed backend recreation; {} absolute Wii pointer "
+               "controller(s) queued for runtime reset",
+               recovery_count);
+  return recovery_count;
 }
 
 bool IsMousePointerRecoveryEligible(const ControllerEmu::EmulatedController* controller,
-                                    WiimoteSource source)
+                                    WiimoteSource source,
+                                    const ciface::Core::DeviceContainer& devices)
 {
   if (source != WiimoteSource::Emulated)
     return false;
 
   const auto* const wiimote = dynamic_cast<const WiimoteEmu::Wiimote*>(controller);
-  return wiimote != nullptr && wiimote->GetMousePointerDevice().has_value();
+  return wiimote != nullptr &&
+         wiimote->ResolveEffectiveMousePointerDevice(devices).has_value();
+}
+
+bool HasMousePointerRecoveryEligibleController()
+{
+  const Core::State core_state = Core::GetState(Core::System::GetInstance());
+  if (core_state == Core::State::Uninitialized || core_state == Core::State::Stopping)
+    return false;
+
+  for (unsigned int index = 0; index < MAX_WIIMOTES; ++index)
+  {
+    if (static_cast<int>(index) < s_config.GetControllerCount() &&
+        IsMousePointerRecoveryEligible(s_config.GetController(static_cast<int>(index)),
+                                       GetSource(index), g_controller_interface))
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool ShouldRestoreMousePointerOnFocusChange(
-    const ControllerEmu::EmulatedController* controller, WiimoteSource source, bool focused)
+    const ControllerEmu::EmulatedController* controller, WiimoteSource source, bool focused,
+    const ciface::Core::DeviceContainer& devices)
 {
-  return focused && IsMousePointerRecoveryEligible(controller, source);
+  return focused && IsMousePointerRecoveryEligible(controller, source, devices);
 }
 
 void HandleRendererFocusChanged(bool focused)
@@ -318,18 +492,17 @@ void HandleRendererFocusChanged(bool focused)
     }
 
     auto* const controller = s_config.GetController(static_cast<int>(index));
-    if (!IsMousePointerRecoveryEligible(controller, GetSource(index)))
+    if (!IsMousePointerRecoveryEligible(controller, GetSource(index), g_controller_interface))
       continue;
 
-    auto* const wiimote = static_cast<WiimoteEmu::Wiimote*>(controller);
-    const std::optional<std::string> mouse_device = wiimote->GetMousePointerDevice();
+    const auto* const wiimote = static_cast<WiimoteEmu::Wiimote*>(controller);
+    const std::optional<std::string> mouse_device =
+        wiimote->ResolveEffectiveMousePointerDevice(g_controller_interface);
     if (!mouse_device)
       continue;
 
     INFO_LOG_FMT(WIIMOTE, "Render window focus {} for mouse-controlled Wii pointer {} ('{}')",
                  focused ? "regained" : "lost", index + 1, *mouse_device);
-    if (ShouldRestoreMousePointerOnFocusChange(controller, GetSource(index), focused))
-      RestoreMousePointer(index, PointerRecoveryTrigger::FocusRegained);
   }
 }
 

@@ -159,9 +159,10 @@ public:
   u8 GetWiimoteDeviceIndex() const override;
   void SetWiimoteDeviceIndex(u8 index) override;
 
-  // Returns the fully-qualified device shared by all four absolute Cursor mappings.
-  // Stick-controlled and partially configured Point groups return no value.
-  std::optional<std::string> GetMousePointerDevice() const;
+  // Resolves the device shared by all four absolute Cursor mappings. Mappings may explicitly
+  // qualify the device or use this controller's selected default device.
+  std::optional<std::string>
+  ResolveEffectiveMousePointerDevice(const ciface::Core::DeviceContainer& devices) const;
   void ResetPointerState();
 
   void PrepareInput(WiimoteEmu::DesiredWiimoteState* target_state,

@@ -37,6 +37,7 @@
 
 #include "Common/Config/Config.h"
 #include "Common/FileUtil.h"
+#include "Common/Logging/Log.h"
 #include "Common/ScopeGuard.h"
 #include "Common/Version.h"
 #include "Common/WindowSystemInfo.h"
@@ -52,6 +53,7 @@
 #include "Core/Config/WiimoteSettings.h"
 #include "Core/Core.h"
 #include "Core/FreeLookManager.h"
+#include "Core/Host.h"
 #include "Core/HW/DVD/DVDInterface.h"
 #include "Core/HW/GBAPad.h"
 #include "Core/HW/GCKeyboard.h"
@@ -536,6 +538,12 @@ void MainWindow::ConnectMenuBar()
   connect(m_menu_bar, &MenuBar::Fullscreen, this, &MainWindow::FullScreen);
   connect(m_menu_bar, &MenuBar::FrameAdvance, this, &MainWindow::FrameAdvance);
   connect(m_menu_bar, &MenuBar::Screenshot, this, &MainWindow::ScreenShot);
+  connect(m_menu_bar, &MenuBar::OpenQuickMenu, this,
+          [this] { m_render_widget->ToggleQuickMenu(); });
+  connect(m_menu_bar, &MenuBar::RestoreWiiPointer, this, [] {
+    Host::GetInstance()->RequestWiiPointerRecovery(
+        Wiimote::PointerRecoveryEntryPoint::MainMenu);
+  });
   connect(m_menu_bar, &MenuBar::StateLoad, this, &MainWindow::StateLoad);
   connect(m_menu_bar, &MenuBar::StateSave, this, &MainWindow::StateSave);
   connect(m_menu_bar, &MenuBar::StateLoadSlot, this, &MainWindow::StateLoadSlot);
@@ -621,6 +629,11 @@ void MainWindow::ConnectHotkeys()
           &MainWindow::RefreshGameList);
   connect(m_hotkey_scheduler, &HotkeyScheduler::StopHotkey, this, &MainWindow::RequestStop);
   connect(m_hotkey_scheduler, &HotkeyScheduler::ResetHotkey, this, &MainWindow::Reset);
+  connect(m_hotkey_scheduler, &HotkeyScheduler::OpenQuickMenu, this,
+          [this] { m_render_widget->ToggleQuickMenu(); });
+  connect(m_hotkey_scheduler, &HotkeyScheduler::RestoreWiiPointer, this, [] {
+    Host::GetInstance()->RequestWiiPointerRecovery(Wiimote::PointerRecoveryEntryPoint::Hotkey);
+  });
   connect(m_hotkey_scheduler, &HotkeyScheduler::ScreenShotHotkey, this, &MainWindow::ScreenShot);
   connect(m_hotkey_scheduler, &HotkeyScheduler::FullScreenHotkey, this, &MainWindow::FullScreen);
 
@@ -726,6 +739,12 @@ void MainWindow::ConnectRenderWidget()
     if (m_render_widget->isFullScreen())
       SetFullScreenResolution(focus);
   });
+  connect(m_render_widget, &RenderWidget::QuickMenuControllerSettingsRequested, this, [this] {
+    m_quick_menu_controller_settings_pending = true;
+    ShowControllersWindow();
+  });
+  connect(m_render_widget, &RenderWidget::QuickMenuStopRequested, this,
+          &MainWindow::RequestStop);
 }
 
 void MainWindow::ConnectHost()
@@ -1019,9 +1038,20 @@ bool MainWindow::RequestStop()
     {
       message = tr("Do you want to stop the current emulation?");
     }
-    auto confirm = ModalMessageBox::question(confirm_parent, tr("Confirm"), message,
-                                             QMessageBox::Yes | QMessageBox::No,
-                                             QMessageBox::NoButton, Qt::ApplicationModal);
+    INFO_LOG_FMT(WIIMOTE,
+                 "Quit confirmation dialog opened: render_active={}, render_has_focus={}, "
+                 "host_renderer_focus={}",
+                 m_render_widget->isActiveWindow(), m_render_widget->hasFocus(),
+                 Host_RendererHasFocus());
+    const auto confirm = ModalMessageBox::question(confirm_parent, tr("Confirm"), message,
+                                                   QMessageBox::Yes | QMessageBox::No,
+                                                   QMessageBox::NoButton, Qt::ApplicationModal);
+    INFO_LOG_FMT(WIIMOTE,
+                 "Quit confirmation modal widget closed: response={}, active_modal={}, "
+                 "render_active={}, render_has_focus={}, host_renderer_focus={}",
+                 confirm == QMessageBox::Yes ? "Quit" : "Don't Quit",
+                 QApplication::activeModalWidget() != nullptr, m_render_widget->isActiveWindow(),
+                 m_render_widget->hasFocus(), Host_RendererHasFocus());
 
     // If a user confirmed stopping the emulation, we do not capture the cursor again,
     // even if the render widget will stay alive for a while.
@@ -1030,11 +1060,15 @@ bool MainWindow::RequestStop()
     // (assuming cursor locking is on).
     if (confirm != QMessageBox::Yes)
     {
+      INFO_LOG_FMT(WIIMOTE, "Don't Quit selected; restoring emulation and deferring Wii pointer "
+                            "recovery until the Qt event loop confirms render focus");
       m_render_widget->SetWaitingForMessageBox(false);
 
       if (pause)
         Core::SetState(m_system, state);
 
+      m_render_widget->RestoreFocusAndRequestWiiPointerRecovery(
+          Wiimote::PointerRecoveryTrigger::FocusRegained);
       return false;
     }
     else
@@ -1323,6 +1357,12 @@ void MainWindow::HideRenderWidget(bool reinit, bool is_exit)
       if (m_render_widget->isFullScreen())
         SetFullScreenResolution(focus);
     });
+    connect(m_render_widget, &RenderWidget::QuickMenuControllerSettingsRequested, this, [this] {
+      m_quick_menu_controller_settings_pending = true;
+      ShowControllersWindow();
+    });
+    connect(m_render_widget, &RenderWidget::QuickMenuStopRequested, this,
+            &MainWindow::RequestStop);
 
     // The controller interface will still be registered to the old render widget, if the core
     // has booted. Therefore, we should re-bind it to the main window for now. When the core
@@ -1378,6 +1418,14 @@ void MainWindow::ShowSettingsWindow()
 #endif
     m_settings_window = new SettingsWindow(this);
     InstallHotkeyFilter(m_settings_window);
+    connect(m_settings_window, &QDialog::finished, this, [this] {
+      if (!m_quick_menu_controller_settings_pending)
+        return;
+
+      m_quick_menu_controller_settings_pending = false;
+      m_render_widget->RestoreFocusAndRequestWiiPointerRecovery(
+          Wiimote::PointerRecoveryTrigger::FocusRegained);
+    });
   }
 
   m_settings_window->show();

@@ -74,6 +74,7 @@ public:
   using ciface::InputBackend::InputBackend;
   void PopulateDevices() override;
   void HandleWindowChange() override;
+  bool ReconnectWindowInput() override;
 };
 
 std::unique_ptr<ciface::InputBackend> CreateInputBackend(ControllerInterface* controller_interface)
@@ -87,6 +88,22 @@ void InputBackend::HandleWindowChange()
       [](const auto* dev) { return dev->GetSource() == SOURCE_NAME; }, true);
 
   PopulateDevices();
+}
+
+bool InputBackend::ReconnectWindowInput()
+{
+  const WindowSystemInfo wsi = GetControllerInterface().GetWindowSystemInfo();
+  if (wsi.type != WindowSystemType::X11)
+    return false;
+
+  INFO_LOG_FMT(CONTROLLERINTERFACE,
+               "XInput2 reconnect requested for current render window {}", wsi.render_window);
+  GetControllerInterface().RemoveDevice(
+      [](const auto* dev) { return dev->GetSource() == SOURCE_NAME; }, true);
+  INFO_LOG_FMT(CONTROLLERINTERFACE, "Old XInput2 window-bound devices removed");
+
+  PopulateDevices();
+  return true;
 }
 
 // This function will add zero or more KeyboardMouse objects to devices.
@@ -181,8 +198,9 @@ KeyboardMouse::KeyboardMouse(Window window, int opcode, int pointer, int keyboar
   name = std::string(pointer_device->name);
   XIFreeDeviceInfo(pointer_device);
   INFO_LOG_FMT(CONTROLLERINTERFACE,
-               "XInput2 selected mouse device '{}' (pointer id {}, render window {})", name,
-               pointer_deviceid, m_window);
+               "New XInput2 mouse backend created for device '{}' (pointer id {}, render window "
+               "{})",
+               name, pointer_deviceid, m_window);
 
   // Tell core X functions which keyboard is "the" keyboard for this
   // X connection.
@@ -266,6 +284,8 @@ KeyboardMouse::KeyboardMouse(Window window, int opcode, int pointer, int keyboar
 
 KeyboardMouse::~KeyboardMouse()
 {
+  INFO_LOG_FMT(CONTROLLERINTERFACE,
+               "Destroying XInput2 mouse device '{}' for render window {}", name, m_window);
   XCloseDisplay(m_display);
 }
 
@@ -283,8 +303,8 @@ bool KeyboardMouse::UpdateCursor(bool should_center_mouse)
   if (!XGetWindowAttributes(m_display, m_window, &win_attribs))
   {
     WARN_LOG_FMT(CONTROLLERINTERFACE,
-                 "XInput2 could not inspect the render window while refreshing mouse device '{}'",
-                 name);
+                 "XInput2 could not inspect render window {} while refreshing mouse device '{}'",
+                 m_window, name);
     return false;
   }
   const auto win_width = std::max(win_attribs.width, 1);
@@ -300,8 +320,8 @@ bool KeyboardMouse::UpdateCursor(bool should_center_mouse)
                         &win_x, &win_y, &button_state, &mods, &group))
     {
       WARN_LOG_FMT(CONTROLLERINTERFACE,
-                   "XInput2 could not refresh absolute cursor position for mouse device '{}'",
-                   name);
+                   "XInput2 absolute cursor query failed for mouse device '{}' on render window {}",
+                   name, m_window);
       free(button_state.mask);
       return false;
     }
@@ -440,8 +460,10 @@ Core::DeviceRemoval KeyboardMouse::UpdateInput()
     {
       m_cursor_refresh_generation = cursor_refresh_generation;
       INFO_LOG_FMT(CONTROLLERINTERFACE,
-                   "XInput2 {} absolute Wii pointer cursor refresh for mouse device '{}'",
-                   refreshed ? "completed" : "failed", name);
+                   "XInput2 {} absolute Wii pointer cursor refresh for mouse device '{}' on "
+                   "render window {}; cursor=({}, {})",
+                   refreshed ? "completed" : "failed", name, m_window, m_state.cursor.x,
+                   m_state.cursor.y);
     }
   }
 

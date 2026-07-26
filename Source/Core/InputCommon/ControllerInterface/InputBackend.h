@@ -29,6 +29,9 @@ public:
   virtual void UpdateInput(std::vector<std::weak_ptr<ciface::Core::Device>>& devices_to_remove);
 
   virtual void HandleWindowChange();
+  // Recreate a backend whose device lifetime is tied to the render window. Returns true when this
+  // backend handled the reconnect request.
+  virtual bool ReconnectWindowInput();
 
   ControllerInterface& GetControllerInterface();
 

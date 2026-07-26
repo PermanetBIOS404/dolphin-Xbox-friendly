@@ -166,6 +166,29 @@ void ControllerInterface::RefreshDevices(RefreshReason reason)
     InvokeDevicesChangedCallbacks();
 }
 
+bool ControllerInterface::ReconnectWindowInput()
+{
+  if (!m_is_init)
+    return false;
+
+  std::lock_guard lk_population(m_devices_population_mutex);
+  m_populating_devices_counter.fetch_add(1);
+
+  bool reconnected = false;
+  for (auto& backend : m_input_backends)
+    reconnected |= backend->ReconnectWindowInput();
+
+  if (m_populating_devices_counter.fetch_sub(1) == 1 && reconnected)
+  {
+    // This final callback binds every controller reference to the newly created window device.
+    InvokeDevicesChangedCallbacks();
+    INFO_LOG_FMT(CONTROLLERINTERFACE,
+                 "Window input backend reconnected and all controller references refreshed");
+  }
+
+  return reconnected;
+}
+
 void ControllerInterface::PlatformPopulateDevices(const std::function<void()>& callback)
 {
   if (!m_is_init)

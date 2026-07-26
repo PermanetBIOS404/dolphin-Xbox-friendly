@@ -7,6 +7,8 @@
 
 #include <QObject>
 
+#include "Core/HW/Wiimote.h"
+
 // Singleton that talks to the Core via the interface defined in Core/Host.h.
 // Because Host_* calls might come from different threads than the MainWindow,
 // the Host class communicates with it via signals/slots only.
@@ -26,6 +28,7 @@ public:
   bool GetRenderFullscreen();
   bool GetGBAFocus();
   bool GetTASInputFocus() const;
+  bool IsQuickMenuOpen() const;
 
   void SetMainWindowHandle(void* handle);
   void SetRenderHandle(void* handle);
@@ -33,7 +36,9 @@ public:
   void SetRenderFullFocus(bool focus);
   void SetRenderFullscreen(bool fullscreen);
   void SetTASInputFocus(bool focus);
+  void SetQuickMenuOpen(bool open);
   void ResizeSurface(int new_width, int new_height);
+  void RequestWiiPointerRecovery(Wiimote::PointerRecoveryEntryPoint entry_point);
 
 signals:
   void RequestTitle(const QString& title);
@@ -44,6 +49,7 @@ signals:
   void JitProfileDataWiped();
   void PPCSymbolsChanged();
   void PPCBreakpointsChanged();
+  void WiiPointerRecoveryRequested(Wiimote::PointerRecoveryTrigger trigger);
 
 private:
   Host();
@@ -55,4 +61,5 @@ private:
   std::atomic<bool> m_render_full_focus{false};
   std::atomic<bool> m_render_fullscreen{false};
   std::atomic<bool> m_tas_input_focus{false};
+  std::atomic<bool> m_quick_menu_open{false};
 };

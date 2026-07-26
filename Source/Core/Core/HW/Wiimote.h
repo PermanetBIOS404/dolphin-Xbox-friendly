@@ -12,6 +12,11 @@
 class InputConfig;
 class PointerWrap;
 
+namespace ciface::Core
+{
+class DeviceContainer;
+}
+
 namespace ControllerEmu
 {
 class ControlGroup;
@@ -69,16 +74,69 @@ namespace Wiimote
 enum class PointerRecoveryTrigger
 {
   Manual,
-  FocusRegained
+  FocusRegained,
+  InitialActivation
+};
+
+enum class PointerRecoveryEntryPoint
+{
+  SettingsButton,
+  MainMenu,
+  Hotkey,
+  QuickMenu
 };
 
 enum class PointerRecoveryResult
 {
-  Restored,
+  Queued,
   NotConfigured,
   NotEmulated,
   Unavailable
 };
+
+enum class PointerRecoveryRuntimeResult
+{
+  NoRequest,
+  DeferredByInputGate,
+  Executed
+};
+
+class PointerRecoveryRequest
+{
+public:
+  // Returns true only when this call creates a new pending request.
+  bool Request();
+  PointerRecoveryRuntimeResult TryConsume(bool input_gate_open);
+  void Clear();
+
+private:
+  std::atomic<bool> m_pending = false;
+};
+
+class PointerInitialActivation
+{
+public:
+  // Returns true once per emulation session.
+  bool RequestOnce();
+  void Complete();
+  void Reset();
+
+private:
+  std::atomic<bool> m_started = false;
+};
+
+struct PointerRecoveryReadiness
+{
+  bool no_active_modal = false;
+  bool render_widget_focused = false;
+  bool host_renderer_focused = false;
+  bool input_backend_valid = false;
+};
+
+bool IsPointerRecoveryReady(const PointerRecoveryReadiness& readiness);
+PointerRecoveryTrigger GetPointerRecoveryTriggerForEntryPoint(PointerRecoveryEntryPoint entry_point);
+PointerRecoveryRuntimeResult TryConsumeMousePointerRecovery(unsigned int index,
+                                                            bool input_gate_open);
 
 enum class InitializeMode
 {
@@ -98,11 +156,16 @@ void Resume();
 void Pause();
 
 PointerRecoveryResult RestoreMousePointer(unsigned int index, PointerRecoveryTrigger trigger);
+unsigned int RestoreMousePointers(PointerRecoveryTrigger trigger);
+unsigned int ReconnectMouseInput();
 void HandleRendererFocusChanged(bool focused);
+bool HasMousePointerRecoveryEligibleController();
 bool IsMousePointerRecoveryEligible(const ControllerEmu::EmulatedController* controller,
-                                    WiimoteSource source);
+                                    WiimoteSource source,
+                                    const ciface::Core::DeviceContainer& devices);
 bool ShouldRestoreMousePointerOnFocusChange(
-    const ControllerEmu::EmulatedController* controller, WiimoteSource source, bool focused);
+    const ControllerEmu::EmulatedController* controller, WiimoteSource source, bool focused,
+    const ciface::Core::DeviceContainer& devices);
 
 void DoState(PointerWrap& p);
 InputConfig* GetConfig();

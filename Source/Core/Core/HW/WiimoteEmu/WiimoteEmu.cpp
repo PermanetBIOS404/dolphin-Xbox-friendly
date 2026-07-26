@@ -18,6 +18,7 @@
 #include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
 #include "Common/MathUtil.h"
+#include "Common/StringUtil.h"
 
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
@@ -57,19 +58,28 @@ using namespace WiimoteCommon;
 
 namespace
 {
-std::optional<std::string> GetQualifiedControlDevice(const std::string& expression,
-                                                     std::string_view control_name)
+std::optional<ciface::ExpressionParser::ControlQualifier>
+ParseSingleCursorControl(const std::string& expression, std::string_view expected_control)
 {
-  const std::string suffix = fmt::format(":{}{}", control_name, '`');
-  std::size_t suffix_position = 0;
-  while ((suffix_position = expression.find(suffix, suffix_position)) != std::string::npos)
+  std::string_view token = StripWhitespace(expression);
+  if (token.size() >= 2 && token.front() == '`' && token.back() == '`')
+    token = token.substr(1, token.size() - 2);
+
+  // Point recovery intentionally accepts only a single direct control. Compound expressions are
+  // valid for general mapping, but cannot identify one unambiguous absolute cursor device.
+  if (token.empty() || token.find('`') != std::string_view::npos)
+    return std::nullopt;
+
+  ciface::ExpressionParser::ControlQualifier qualifier;
+  qualifier.FromString(std::string(token));
+  if (qualifier.control_name != expected_control)
+    return std::nullopt;
+
+  if (qualifier.has_device && qualifier.device_qualifier.ToString().empty())
   {
-    const std::size_t token_start = expression.rfind('`', suffix_position);
-    if (token_start != std::string::npos && token_start + 1 < suffix_position)
-      return expression.substr(token_start + 1, suffix_position - token_start - 1);
-    suffix_position += suffix.size();
+    return std::nullopt;
   }
-  return std::nullopt;
+  return qualifier;
 }
 }  // namespace
 
@@ -395,7 +405,8 @@ ControllerEmu::ControlGroup* Wiimote::GetNunchukGroup(NunchukGroup group) const
       ->GetGroup(group);
 }
 
-std::optional<std::string> Wiimote::GetMousePointerDevice() const
+std::optional<std::string> Wiimote::ResolveEffectiveMousePointerDevice(
+    const ciface::Core::DeviceContainer& devices) const
 {
   const auto lock = GetStateLock();
   if (m_ir->IsRelativeInput())
@@ -404,16 +415,38 @@ std::optional<std::string> Wiimote::GetMousePointerDevice() const
   static constexpr std::array<std::string_view, 4> cursor_controls = {
       "Cursor Y-", "Cursor Y+", "Cursor X-", "Cursor X+"};
 
-  std::optional<std::string> common_device;
+  std::optional<ciface::Core::DeviceQualifier> common_device;
   for (std::size_t i = 0; i < cursor_controls.size(); ++i)
   {
-    const auto device = GetQualifiedControlDevice(
+    const auto control = ParseSingleCursorControl(
         m_ir->controls[i]->control_ref->GetExpression(), cursor_controls[i]);
-    if (!device || (common_device && *device != *common_device))
+    if (!control)
       return std::nullopt;
-    common_device = device;
+
+    const ciface::Core::DeviceQualifier effective_device =
+        control->has_device ? control->device_qualifier : GetDefaultDevice();
+    if (effective_device.ToString().empty() ||
+        (common_device && *common_device != effective_device))
+    {
+      return std::nullopt;
+    }
+    common_device = effective_device;
   }
-  return common_device;
+
+  if (!common_device)
+    return std::nullopt;
+
+  const std::shared_ptr<ciface::Core::Device> device = devices.FindDevice(*common_device);
+  if (!device)
+    return std::nullopt;
+
+  for (const std::string_view control : cursor_controls)
+  {
+    if (!device->FindInput(control))
+      return std::nullopt;
+  }
+
+  return common_device->ToString();
 }
 
 void Wiimote::ResetPointerState()
@@ -532,8 +565,27 @@ void Wiimote::BuildDesiredWiimoteState(DesiredWiimoteState* target_state,
   // Data is later accessed in IsSideways and IsUpright
   m_hotkeys->UpdateState();
 
+  const auto pointer_recovery = ::Wiimote::TryConsumeMousePointerRecovery(
+      GetWiimoteDeviceIndex(), ControlReference::GetInputGate());
+  if (pointer_recovery == ::Wiimote::PointerRecoveryRuntimeResult::Executed)
+  {
+    // PrepareInput already holds this controller's state lock.
+    m_ir->ResetRuntimeState();
+    m_point_state = {};
+    INFO_LOG_FMT(WIIMOTE,
+                 "Wii pointer recovery executed for remote {} on controller input thread; "
+                 "input gate is open",
+                 GetWiimoteDeviceIndex() + 1);
+  }
+
   // Update our motion simulations.
   StepDynamics();
+
+  if (pointer_recovery == ::Wiimote::PointerRecoveryRuntimeResult::Executed)
+  {
+    INFO_LOG_FMT(WIIMOTE, "Wii pointer recovery post-update for remote {}: Point hidden={}",
+                 GetWiimoteDeviceIndex() + 1, m_point_state.position.y == -1000.f);
+  }
 
   // Fetch pressed buttons from user input.
   target_state->buttons.hex = 0;

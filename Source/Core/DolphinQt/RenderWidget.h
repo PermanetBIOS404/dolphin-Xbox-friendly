@@ -6,8 +6,12 @@
 #include <QEvent>
 #include <QWidget>
 
+#include "Core/HW/Wiimote.h"
+#include "DolphinQt/QuickMenuState.h"
+
 class QMouseEvent;
 class QTimer;
+class QuickMenu;
 
 class RenderWidget final : public QWidget
 {
@@ -15,6 +19,7 @@ class RenderWidget final : public QWidget
 
 public:
   explicit RenderWidget(QWidget* parent = nullptr);
+  ~RenderWidget() override;
 
   bool event(QEvent* event) override;
   void showFullScreen();
@@ -23,6 +28,13 @@ public:
   void SetCursorLockedOnNextActivation(bool locked = true);
   void SetWaitingForMessageBox(bool waiting_for_message_box);
   void SetCursorLocked(bool locked, bool follow_aspect_ratio = true);
+  void RequestWiiPointerRecovery(
+      Wiimote::PointerRecoveryTrigger trigger = Wiimote::PointerRecoveryTrigger::FocusRegained);
+  void RestoreFocusAndRequestWiiPointerRecovery(
+      Wiimote::PointerRecoveryTrigger trigger = Wiimote::PointerRecoveryTrigger::FocusRegained);
+  void RequestMouseInputReconnect();
+  void ToggleQuickMenu();
+  bool IsQuickMenuOpen() const;
 
 signals:
   void EscapePressed();
@@ -31,6 +43,8 @@ signals:
   void StateChanged(bool fullscreen);
   void SizeChanged(int new_width, int new_height);
   void FocusChanged(bool focus);
+  void QuickMenuControllerSettingsRequested();
+  void QuickMenuStopRequested();
 
 private:
   void HandleCursorTimer();
@@ -40,6 +54,9 @@ private:
   void OnLockCursorChanged();
   void OnKeepOnTopChanged(bool top);
   void UpdateCursor();
+  void QueueWiiPointerRecovery();
+  void TryWiiPointerRecovery();
+  void CloseQuickMenu(QuickMenuAction action);
   void PassEventToPresenter(const QEvent* event);
   void SetPresenterKeyMap();
   void dragEnterEvent(QDragEnterEvent* event) override;
@@ -56,4 +73,12 @@ private:
   bool m_dont_lock_cursor_on_show = false;
   bool m_waiting_for_message_box = false;
   bool m_should_unpause_on_focus = false;
+  bool m_wii_pointer_recovery_pending = false;
+  bool m_wii_pointer_recovery_queued = false;
+  bool m_wii_pointer_recovery_manual = false;
+  bool m_wii_pointer_recovery_initial = false;
+  Wiimote::PointerInitialActivation m_initial_pointer_activation;
+  QuickMenu* m_quick_menu = nullptr;
+  QuickMenuSession m_quick_menu_session;
+  MouseInputReconnectRequest m_mouse_reconnect_request;
 };

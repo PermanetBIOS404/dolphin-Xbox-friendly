@@ -21,6 +21,7 @@
 #include "DolphinQt/Config/Mapping/MappingIndicator.h"
 #include "DolphinQt/Config/Mapping/MappingNumeric.h"
 #include "DolphinQt/Config/Mapping/MappingWindow.h"
+#include "DolphinQt/Host.h"
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 
 #include "Core/HW/Wiimote.h"
@@ -231,32 +232,10 @@ QGroupBox* MappingWidget::CreateGroupBox(const QString& name, ControllerEmu::Con
           tr("Refresh the active mouse device and reset the running Wii pointer state."));
       form_layout->insertRow(3, restore_button);
 
-      connect(restore_button, &QPushButton::clicked,
-              [this, index = wiimote->GetWiimoteDeviceIndex()] {
-                const auto result =
-                    Wiimote::RestoreMousePointer(index, Wiimote::PointerRecoveryTrigger::Manual);
-                if (result == Wiimote::PointerRecoveryResult::Restored)
-                  return;
-
-                QString reason;
-                switch (result)
-                {
-                case Wiimote::PointerRecoveryResult::NotConfigured:
-                  reason =
-                      tr("This Wii Remote's Point group is not configured for an absolute mouse.");
-                  break;
-                case Wiimote::PointerRecoveryResult::NotEmulated:
-                  reason = tr("Pointer recovery does not apply to a real Wii Remote.");
-                  break;
-                case Wiimote::PointerRecoveryResult::Unavailable:
-                  reason = tr("The running controller interface is not available.");
-                  break;
-                case Wiimote::PointerRecoveryResult::Restored:
-                  return;
-                }
-
-                ModalMessageBox::information(this, tr("Restore Wii Pointer"), reason);
-              });
+      connect(restore_button, &QPushButton::clicked, [] {
+        Host::GetInstance()->RequestWiiPointerRecovery(
+            Wiimote::PointerRecoveryEntryPoint::SettingsButton);
+      });
     }
 
     connect(mouse_button, &QPushButton::clicked, [this, grp = static_cast<Cursor*>(group)] {

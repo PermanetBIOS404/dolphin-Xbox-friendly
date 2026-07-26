@@ -56,6 +56,12 @@ Host* Host::GetInstance()
   return s_instance;
 }
 
+void Host::RequestWiiPointerRecovery(Wiimote::PointerRecoveryEntryPoint entry_point)
+{
+  emit WiiPointerRecoveryRequested(
+      Wiimote::GetPointerRecoveryTriggerForEntryPoint(entry_point));
+}
+
 void Host::SetRenderHandle(void* handle)
 {
   m_render_to_main = Config::Get(Config::MAIN_RENDER_TO_MAIN);
@@ -134,6 +140,11 @@ bool Host::GetRenderFullFocus()
   return m_render_full_focus;
 }
 
+bool Host::IsQuickMenuOpen() const
+{
+  return m_quick_menu_open;
+}
+
 void Host::SetRenderFocus(bool focus)
 {
   m_render_focus = focus;
@@ -149,6 +160,11 @@ void Host::SetRenderFocus(bool focus)
 void Host::SetRenderFullFocus(bool focus)
 {
   m_render_full_focus = focus;
+}
+
+void Host::SetQuickMenuOpen(bool open)
+{
+  m_quick_menu_open = open;
 }
 
 bool Host::GetGBAFocus()
@@ -283,6 +299,9 @@ void Host_RequestRenderWindowSize(int w, int h)
 
 bool Host_UIBlocksControllerState()
 {
+  if (Host::GetInstance()->IsQuickMenuOpen())
+    return true;
+
   // TODO: Remove the Paused check once async presentation is implemented.
   return ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureKeyboard &&
          Core::GetState(Core::System::GetInstance()) != Core::State::Paused;

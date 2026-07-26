@@ -87,6 +87,9 @@ public:
   void ChangeWindow(void* hwnd, WindowChangeReason reason = WindowChangeReason::Other);
   // Can be called by any thread at any time (when initialized).
   void RefreshDevices(RefreshReason reason = RefreshReason::Other);
+  // Recreate only the input backend whose lifetime is tied to the current render window.
+  // Returns true when a platform backend handled the request.
+  bool ReconnectWindowInput();
   void Shutdown();
   bool AddDevice(std::shared_ptr<ciface::Core::Device> device);
   // Removes all the devices the function returns true to.
