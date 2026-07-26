@@ -19,6 +19,7 @@
 
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
+#include "Core/HW/Wiimote.h"
 #include "Core/State.h"
 #include "Core/System.h"
 
@@ -442,6 +443,7 @@ bool RenderWidget::event(QEvent* event)
     }
 
     emit FocusChanged(true);
+    Wiimote::HandleRendererFocusChanged(true);
     break;
   case QEvent::WindowDeactivate:
     SetCursorLocked(false);
@@ -462,6 +464,7 @@ bool RenderWidget::event(QEvent* event)
     }
 
     emit FocusChanged(false);
+    Wiimote::HandleRendererFocusChanged(false);
     break;
   case QEvent::Move:
     SetCursorLocked(m_cursor_locked);

@@ -114,6 +114,12 @@ public:
 
   bool IsMouseCenteringRequested() const;
 
+  // Request that absolute mouse cursor inputs query the current host position even if their
+  // backend has not received a motion event. The monotonically increasing value lets every mouse
+  // device observe the request without one device consuming it before the others.
+  void RequestMouseCursorRefresh();
+  u64 GetMouseCursorRefreshGeneration() const;
+
   [[nodiscard]] Common::EventHook
   RegisterDevicesChangedCallback(Common::HookableEvent<>::CallbackType callback);
 
@@ -138,6 +144,7 @@ private:
   WindowSystemInfo m_wsi;
   std::atomic<float> m_aspect_ratio_adjustment = 1;
   std::atomic<bool> m_requested_mouse_centering = false;
+  std::atomic<u64> m_mouse_cursor_refresh_generation = 0;
 
   std::vector<std::unique_ptr<ciface::InputBackend>> m_input_backends;
 };

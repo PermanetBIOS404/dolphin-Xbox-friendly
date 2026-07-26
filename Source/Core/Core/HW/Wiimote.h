@@ -15,6 +15,7 @@ class PointerWrap;
 namespace ControllerEmu
 {
 class ControlGroup;
+class EmulatedController;
 }
 
 namespace WiimoteEmu
@@ -65,6 +66,20 @@ HIDWiimote* GetHIDWiimoteSource(unsigned int index);
 
 namespace Wiimote
 {
+enum class PointerRecoveryTrigger
+{
+  Manual,
+  FocusRegained
+};
+
+enum class PointerRecoveryResult
+{
+  Restored,
+  NotConfigured,
+  NotEmulated,
+  Unavailable
+};
+
 enum class InitializeMode
 {
   DO_WAIT_FOR_WIIMOTES,
@@ -81,6 +96,13 @@ void LoadConfig();
 void GenerateDynamicInputTextures();
 void Resume();
 void Pause();
+
+PointerRecoveryResult RestoreMousePointer(unsigned int index, PointerRecoveryTrigger trigger);
+void HandleRendererFocusChanged(bool focused);
+bool IsMousePointerRecoveryEligible(const ControllerEmu::EmulatedController* controller,
+                                    WiimoteSource source);
+bool ShouldRestoreMousePointerOnFocusChange(
+    const ControllerEmu::EmulatedController* controller, WiimoteSource source, bool focused);
 
 void DoState(PointerWrap& p);
 InputConfig* GetConfig();

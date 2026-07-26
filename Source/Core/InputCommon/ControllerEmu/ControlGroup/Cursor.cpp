@@ -185,6 +185,19 @@ void Cursor::SetRelativeInput(bool value)
   m_relative_setting.SetValue(value);
 }
 
+bool Cursor::IsRelativeInput() const
+{
+  return m_relative_setting.GetValue();
+}
+
+void Cursor::ResetRuntimeState()
+{
+  m_state = {};
+  m_prev_result = {};
+  m_auto_hide_timer = AUTO_HIDE_MS;
+  m_last_update = Clock::now();
+}
+
 bool Cursor::StateData::IsVisible() const
 {
   return !std::isnan(x);

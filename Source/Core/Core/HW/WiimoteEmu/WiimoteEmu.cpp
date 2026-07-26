@@ -55,6 +55,24 @@ namespace WiimoteEmu
 {
 using namespace WiimoteCommon;
 
+namespace
+{
+std::optional<std::string> GetQualifiedControlDevice(const std::string& expression,
+                                                     std::string_view control_name)
+{
+  const std::string suffix = fmt::format(":{}{}", control_name, '`');
+  std::size_t suffix_position = 0;
+  while ((suffix_position = expression.find(suffix, suffix_position)) != std::string::npos)
+  {
+    const std::size_t token_start = expression.rfind('`', suffix_position);
+    if (token_start != std::string::npos && token_start + 1 < suffix_position)
+      return expression.substr(token_start + 1, suffix_position - token_start - 1);
+    suffix_position += suffix.size();
+  }
+  return std::nullopt;
+}
+}  // namespace
+
 static const u16 button_bitmasks[] = {
     Wiimote::BUTTON_A,     Wiimote::BUTTON_B,    Wiimote::BUTTON_ONE, Wiimote::BUTTON_TWO,
     Wiimote::BUTTON_MINUS, Wiimote::BUTTON_PLUS, Wiimote::BUTTON_HOME};
@@ -375,6 +393,34 @@ ControllerEmu::ControlGroup* Wiimote::GetNunchukGroup(NunchukGroup group) const
 {
   return static_cast<Nunchuk*>(m_attachments->GetAttachmentList()[ExtensionNumber::NUNCHUK].get())
       ->GetGroup(group);
+}
+
+std::optional<std::string> Wiimote::GetMousePointerDevice() const
+{
+  const auto lock = GetStateLock();
+  if (m_ir->IsRelativeInput())
+    return std::nullopt;
+
+  static constexpr std::array<std::string_view, 4> cursor_controls = {
+      "Cursor Y-", "Cursor Y+", "Cursor X-", "Cursor X+"};
+
+  std::optional<std::string> common_device;
+  for (std::size_t i = 0; i < cursor_controls.size(); ++i)
+  {
+    const auto device = GetQualifiedControlDevice(
+        m_ir->controls[i]->control_ref->GetExpression(), cursor_controls[i]);
+    if (!device || (common_device && *device != *common_device))
+      return std::nullopt;
+    common_device = device;
+  }
+  return common_device;
+}
+
+void Wiimote::ResetPointerState()
+{
+  const auto lock = GetStateLock();
+  m_ir->ResetRuntimeState();
+  m_point_state = {};
 }
 
 ControllerEmu::ControlGroup* Wiimote::GetClassicGroup(ClassicGroup group) const

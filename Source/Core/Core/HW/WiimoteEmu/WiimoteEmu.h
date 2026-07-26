@@ -159,6 +159,11 @@ public:
   u8 GetWiimoteDeviceIndex() const override;
   void SetWiimoteDeviceIndex(u8 index) override;
 
+  // Returns the fully-qualified device shared by all four absolute Cursor mappings.
+  // Stick-controlled and partially configured Point groups return no value.
+  std::optional<std::string> GetMousePointerDevice() const;
+  void ResetPointerState();
+
   void PrepareInput(WiimoteEmu::DesiredWiimoteState* target_state,
                     SensorBarState sensor_bar_state) override;
   void Update(const WiimoteEmu::DesiredWiimoteState& target_state) override;

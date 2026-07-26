@@ -404,6 +404,16 @@ bool ControllerInterface::IsMouseCenteringRequested() const
   return m_requested_mouse_centering.load();
 }
 
+void ControllerInterface::RequestMouseCursorRefresh()
+{
+  m_mouse_cursor_refresh_generation.fetch_add(1);
+}
+
+u64 ControllerInterface::GetMouseCursorRefreshGeneration() const
+{
+  return m_mouse_cursor_refresh_generation.load();
+}
+
 // Register a callback to be called when a device is added or removed (as from the input backends'
 // hotplug thread), or when devices are refreshed
 // Returns a handle for later removing the callback.

@@ -116,7 +116,7 @@ private:
   };
 
 private:
-  void UpdateCursor(bool should_center_mouse);
+  bool UpdateCursor(bool should_center_mouse);
 
 public:
   Core::DeviceRemoval UpdateInput() override;
@@ -137,6 +137,7 @@ private:
   const int pointer_deviceid;
   const int keyboard_deviceid;
   const double scroll_increment;
+  u64 m_cursor_refresh_generation = 0;
   std::string name;
 };
 }  // namespace ciface::XInput2

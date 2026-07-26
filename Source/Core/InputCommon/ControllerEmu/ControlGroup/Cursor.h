@@ -41,6 +41,8 @@ public:
   ControlState GetVerticalOffset() const;
 
   void SetRelativeInput(bool enabled);
+  bool IsRelativeInput() const;
+  void ResetRuntimeState();
 
 private:
   Cursor::StateData UpdateState(Cursor::ReshapeData input);

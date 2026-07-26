@@ -162,7 +162,8 @@ void InputBackend::PopulateDevices()
 KeyboardMouse::KeyboardMouse(Window window, int opcode, int pointer, int keyboard,
                              double scroll_increment_)
     : m_window(window), xi_opcode(opcode), pointer_deviceid(pointer), keyboard_deviceid(keyboard),
-      scroll_increment(scroll_increment_)
+      scroll_increment(scroll_increment_),
+      m_cursor_refresh_generation(g_controller_interface.GetMouseCursorRefreshGeneration())
 {
   // The cool thing about each KeyboardMouse object having its own Display
   // is that each one gets its own separate copy of the X11 event stream,
@@ -179,6 +180,9 @@ KeyboardMouse::KeyboardMouse(Window window, int opcode, int pointer, int keyboar
   XIDeviceInfo* const pointer_device = XIQueryDevice(m_display, pointer_deviceid, &unused);
   name = std::string(pointer_device->name);
   XIFreeDeviceInfo(pointer_device);
+  INFO_LOG_FMT(CONTROLLERINTERFACE,
+               "XInput2 selected mouse device '{}' (pointer id {}, render window {})", name,
+               pointer_deviceid, m_window);
 
   // Tell core X functions which keyboard is "the" keyboard for this
   // X connection.
@@ -266,24 +270,41 @@ KeyboardMouse::~KeyboardMouse()
 }
 
 // Update the mouse cursor controls
-void KeyboardMouse::UpdateCursor(bool should_center_mouse)
+bool KeyboardMouse::UpdateCursor(bool should_center_mouse)
 {
-  double root_x, root_y, win_x, win_y;
-  Window root, child;
+  double root_x = 0;
+  double root_y = 0;
+  double win_x = 0;
+  double win_y = 0;
+  Window root = None;
+  Window child = None;
 
-  XWindowAttributes win_attribs;
-  XGetWindowAttributes(m_display, m_window, &win_attribs);
+  XWindowAttributes win_attribs{};
+  if (!XGetWindowAttributes(m_display, m_window, &win_attribs))
+  {
+    WARN_LOG_FMT(CONTROLLERINTERFACE,
+                 "XInput2 could not inspect the render window while refreshing mouse device '{}'",
+                 name);
+    return false;
+  }
   const auto win_width = std::max(win_attribs.width, 1);
   const auto win_height = std::max(win_attribs.height, 1);
 
   {
-    XIButtonState button_state;
-    XIModifierState mods;
-    XIGroupState group;
+    XIButtonState button_state{};
+    XIModifierState mods{};
+    XIGroupState group{};
 
     // Get the absolute position of the mouse pointer and the button state.
-    XIQueryPointer(m_display, pointer_deviceid, m_window, &root, &child, &root_x, &root_y, &win_x,
-                   &win_y, &button_state, &mods, &group);
+    if (!XIQueryPointer(m_display, pointer_deviceid, m_window, &root, &child, &root_x, &root_y,
+                        &win_x, &win_y, &button_state, &mods, &group))
+    {
+      WARN_LOG_FMT(CONTROLLERINTERFACE,
+                   "XInput2 could not refresh absolute cursor position for mouse device '{}'",
+                   name);
+      free(button_state.mask);
+      return false;
+    }
 
     // X buttons are 1-indexed, so to get 32 button bits we need a larger type
     // for the shift.
@@ -310,6 +331,7 @@ void KeyboardMouse::UpdateCursor(bool should_center_mouse)
   // the mouse position as a range from -1 to 1
   m_state.cursor.x = (win_x / win_width * 2 - 1) * window_scale.x;
   m_state.cursor.y = (win_y / win_height * 2 - 1) * window_scale.y;
+  return true;
 }
 
 Core::DeviceRemoval KeyboardMouse::UpdateInput()
@@ -401,6 +423,9 @@ Core::DeviceRemoval KeyboardMouse::UpdateInput()
 
   const bool should_center_mouse = g_controller_interface.IsMouseCenteringRequested() &&
                                    (Host_RendererHasFocus() || Host_TASInputHasFocus());
+  const u64 cursor_refresh_generation =
+      g_controller_interface.GetMouseCursorRefreshGeneration();
+  const bool should_refresh_cursor = cursor_refresh_generation != m_cursor_refresh_generation;
 
   // When a TAS Input window has focus and "Enable Controller Input" is checked most types of
   // input should be read normally as if the render window had focus instead. The cursor is an
@@ -408,8 +433,17 @@ Core::DeviceRemoval KeyboardMouse::UpdateInput()
   // update the Wii IR value (or any other input controlled by the cursor).
   const bool should_update_mouse = update_mouse && !Host_TASInputHasFocus();
 
-  if (should_update_mouse || should_center_mouse)
-    UpdateCursor(should_center_mouse);
+  if (should_update_mouse || should_center_mouse || should_refresh_cursor)
+  {
+    const bool refreshed = UpdateCursor(should_center_mouse);
+    if (should_refresh_cursor)
+    {
+      m_cursor_refresh_generation = cursor_refresh_generation;
+      INFO_LOG_FMT(CONTROLLERINTERFACE,
+                   "XInput2 {} absolute Wii pointer cursor refresh for mouse device '{}'",
+                   refreshed ? "completed" : "failed", name);
+    }
+  }
 
   if (update_keyboard)
     XQueryKeymap(m_display, m_state.keyboard.data());
