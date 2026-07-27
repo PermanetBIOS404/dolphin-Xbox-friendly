@@ -8,7 +8,9 @@
 #include "DolphinQt/QuickMenuState.h"
 
 class QEvent;
+class QHideEvent;
 class QKeyEvent;
+class QShowEvent;
 
 class QuickMenu final : public QWidget
 {
@@ -17,14 +19,24 @@ class QuickMenu final : public QWidget
 public:
   explicit QuickMenu(QWidget* render_widget);
 
-  void Open();
+  bool Open();
   void Close();
-  bool IsOpen() const { return isVisible(); }
+  bool IsOpen() const { return m_open_requested; }
 
 signals:
   void ActionRequested(QuickMenuAction action);
 
 protected:
   bool eventFilter(QObject* watched, QEvent* event) override;
+  void hideEvent(QHideEvent* event) override;
   void keyPressEvent(QKeyEvent* event) override;
+  void showEvent(QShowEvent* event) override;
+
+private:
+  QRect GetTargetGeometry() const;
+  void SynchronizeGeometry();
+
+  QWidget* const m_render_widget;
+  QWidget* const m_render_window;
+  bool m_open_requested = false;
 };

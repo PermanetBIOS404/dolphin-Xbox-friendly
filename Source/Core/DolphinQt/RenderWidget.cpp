@@ -57,6 +57,8 @@ static const char* GetPointerRecoveryTriggerName(Wiimote::PointerRecoveryTrigger
 
 RenderWidget::RenderWidget(QWidget* parent) : QWidget(parent)
 {
+  setObjectName(QStringLiteral("dolphinRenderWidget"));
+  setAccessibleName(tr("Dolphin render surface"));
   setWindowTitle(QStringLiteral("Dolphin"));
   setWindowIcon(Resources::GetAppIcon());
   setWindowRole(QStringLiteral("renderer"));
@@ -65,9 +67,6 @@ RenderWidget::RenderWidget(QWidget* parent) : QWidget(parent)
   QPalette p;
   p.setColor(QPalette::Window, Qt::black);
   setPalette(p);
-
-  m_quick_menu = new QuickMenu(this);
-  connect(m_quick_menu, &QuickMenu::ActionRequested, this, &RenderWidget::CloseQuickMenu);
 
   connect(Host::GetInstance(), &Host::RequestTitle, this, &RenderWidget::setWindowTitle);
   connect(Host::GetInstance(), &Host::WiiPointerRecoveryRequested, this,
@@ -189,29 +188,61 @@ void RenderWidget::RestoreFocusAndRequestWiiPointerRecovery(
   });
 }
 
+void RenderWidget::EnsureQuickMenu()
+{
+  if (m_quick_menu != nullptr)
+    return;
+
+  m_quick_menu = new QuickMenu(this);
+  connect(m_quick_menu, &QuickMenu::ActionRequested, this, &RenderWidget::CloseQuickMenu);
+}
+
 void RenderWidget::ToggleQuickMenu()
 {
+  const Core::State state = Core::GetState(Core::System::GetInstance());
+  INFO_LOG_FMT(COMMON,
+               "RenderWidget Quick Menu request entered: core_state={}, render_widget={}, "
+               "render_visible={}, menu_object={}, session_open={}",
+               static_cast<int>(state), static_cast<const void*>(this), isVisible(),
+               static_cast<const void*>(m_quick_menu), m_quick_menu_session.IsOpen());
+
   if (m_quick_menu_session.IsOpen())
   {
     CloseQuickMenu(QuickMenuAction::Resume);
     return;
   }
 
-  const Core::State state = Core::GetState(Core::System::GetInstance());
   if (state == Core::State::Uninitialized || state == Core::State::Stopping)
+  {
+    WARN_LOG_FMT(COMMON, "Quick Menu request ignored for inactive Core state {}",
+                 static_cast<int>(state));
     return;
+  }
 
   const bool resume_on_close = state == Core::State::Running;
   if (!m_quick_menu_session.Open(resume_on_close))
     return;
 
+  EnsureQuickMenu();
   SetCursorLocked(false);
+  if (!m_quick_menu->Open())
+  {
+    m_quick_menu_session.Close(QuickMenuAction::Resume);
+    ERROR_LOG_FMT(COMMON,
+                  "Quick Menu failed to become visible; overlay input block was not enabled");
+    return;
+  }
+
   Host::GetInstance()->SetQuickMenuOpen(true);
   if (resume_on_close)
     Core::SetState(Core::System::GetInstance(), Core::State::Paused);
 
-  m_quick_menu->Open();
-  INFO_LOG_FMT(WIIMOTE, "Dolphin Quick Menu opened: emulation_paused={}", resume_on_close);
+  INFO_LOG_FMT(COMMON,
+               "Dolphin Quick Menu opened: emulation_paused={}, visible={}, hidden={}, "
+               "geometry=({},{} {}x{})",
+               resume_on_close, m_quick_menu->isVisible(), m_quick_menu->isHidden(),
+               m_quick_menu->geometry().x(), m_quick_menu->geometry().y(),
+               m_quick_menu->geometry().width(), m_quick_menu->geometry().height());
 }
 
 bool RenderWidget::IsQuickMenuOpen() const
@@ -234,12 +265,15 @@ void RenderWidget::CloseQuickMenu(QuickMenuAction action)
     Core::SetState(Core::System::GetInstance(), Core::State::Running);
   }
 
-  INFO_LOG_FMT(WIIMOTE, "Dolphin Quick Menu closed; scheduling render-focus restoration");
+  INFO_LOG_FMT(COMMON,
+               "Dolphin Quick Menu closed: visible={}, hidden={}; scheduling render-focus "
+               "restoration",
+               m_quick_menu->isVisible(), m_quick_menu->isHidden());
   QTimer::singleShot(0, this, [this, action = *closed_action] {
     window()->activateWindow();
     raise();
     setFocus(Qt::OtherFocusReason);
-    INFO_LOG_FMT(WIIMOTE,
+    INFO_LOG_FMT(COMMON,
                  "Quick Menu render focus restored: render_has_focus={}, "
                  "host_renderer_focus={}, active_modal={}",
                  hasFocus(), Host_RendererHasFocus(),

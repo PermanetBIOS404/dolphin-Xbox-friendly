@@ -56,6 +56,7 @@ private:
   void UpdateCursor();
   void QueueWiiPointerRecovery();
   void TryWiiPointerRecovery();
+  void EnsureQuickMenu();
   void CloseQuickMenu(QuickMenuAction action);
   void PassEventToPresenter(const QEvent* event);
   void SetPresenterKeyMap();

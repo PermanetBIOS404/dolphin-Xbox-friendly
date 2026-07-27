@@ -219,6 +219,8 @@ MainWindow::MainWindow(Core::System& system, std::unique_ptr<BootParameters> boo
                        const std::string& movie_path)
     : QMainWindow(nullptr), m_system(system)
 {
+  setObjectName(QStringLiteral("dolphinMainWindow"));
+  setAccessibleName(tr("Dolphin Main Window"));
   setWindowTitle(QString::fromStdString(Common::GetScmRevStr()));
   setWindowIcon(Resources::GetAppIcon());
   setUnifiedTitleAndToolBarOnMac(true);
@@ -538,8 +540,7 @@ void MainWindow::ConnectMenuBar()
   connect(m_menu_bar, &MenuBar::Fullscreen, this, &MainWindow::FullScreen);
   connect(m_menu_bar, &MenuBar::FrameAdvance, this, &MainWindow::FrameAdvance);
   connect(m_menu_bar, &MenuBar::Screenshot, this, &MainWindow::ScreenShot);
-  connect(m_menu_bar, &MenuBar::OpenQuickMenu, this,
-          [this] { m_render_widget->ToggleQuickMenu(); });
+  connect(m_menu_bar, &MenuBar::OpenQuickMenu, this, &MainWindow::OpenQuickMenu);
   connect(m_menu_bar, &MenuBar::RestoreWiiPointer, this, [] {
     Host::GetInstance()->RequestWiiPointerRecovery(
         Wiimote::PointerRecoveryEntryPoint::MainMenu);
@@ -629,8 +630,7 @@ void MainWindow::ConnectHotkeys()
           &MainWindow::RefreshGameList);
   connect(m_hotkey_scheduler, &HotkeyScheduler::StopHotkey, this, &MainWindow::RequestStop);
   connect(m_hotkey_scheduler, &HotkeyScheduler::ResetHotkey, this, &MainWindow::Reset);
-  connect(m_hotkey_scheduler, &HotkeyScheduler::OpenQuickMenu, this,
-          [this] { m_render_widget->ToggleQuickMenu(); });
+  connect(m_hotkey_scheduler, &HotkeyScheduler::OpenQuickMenu, this, &MainWindow::OpenQuickMenu);
   connect(m_hotkey_scheduler, &HotkeyScheduler::RestoreWiiPointer, this, [] {
     Host::GetInstance()->RequestWiiPointerRecovery(Wiimote::PointerRecoveryEntryPoint::Hotkey);
   });
@@ -750,6 +750,24 @@ void MainWindow::ConnectRenderWidget()
 void MainWindow::ConnectHost()
 {
   connect(Host::GetInstance(), &Host::RequestStop, this, &MainWindow::RequestStop);
+}
+
+void MainWindow::OpenQuickMenu()
+{
+  const Core::State state = Core::GetState(m_system);
+  INFO_LOG_FMT(COMMON,
+               "MainWindow Quick Menu handler entered: core_state={}, render_widget={}, "
+               "render_visible={}",
+               static_cast<int>(state), static_cast<const void*>(m_render_widget),
+               m_render_widget != nullptr && m_render_widget->isVisible());
+
+  if (m_render_widget == nullptr)
+  {
+    ERROR_LOG_FMT(COMMON, "Quick Menu request ignored: RenderWidget is null");
+    return;
+  }
+
+  m_render_widget->ToggleQuickMenu();
 }
 
 void MainWindow::ConnectStack()

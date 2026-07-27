@@ -21,6 +21,7 @@
 #include "Common/CommonPaths.h"
 #include "Common/FileUtil.h"
 #include "Common/IOFile.h"
+#include "Common/Logging/Log.h"
 
 #include "Core/AchievementManager.h"
 #include "Core/CommonTitles.h"
@@ -83,6 +84,8 @@ QString MenuBar::GetSignatureSelector() const
 MenuBar::MenuBar(QWidget* parent) : QMenuBar(parent)
 {
   s_menu_bar = this;
+  setObjectName(QStringLiteral("dolphinMenuBar"));
+  setAccessibleName(tr("Dolphin main menu"));
 
   AddFileMenu();
   AddEmulationMenu();
@@ -398,6 +401,10 @@ void MenuBar::AddEmulationMenu()
   m_screenshot_action = emu_menu->addAction(tr("Take Screenshot"), this, &MenuBar::Screenshot);
   m_quick_menu_action =
       emu_menu->addAction(tr("Dolphin Quick Menu"), this, &MenuBar::OpenQuickMenu);
+  m_quick_menu_action->setObjectName(QStringLiteral("actionDolphinQuickMenu"));
+  connect(m_quick_menu_action, &QAction::triggered, this, [] {
+    INFO_LOG_FMT(COMMON, "Emulation menu QAction triggered: Dolphin Quick Menu");
+  });
   m_restore_wii_pointer_action =
       emu_menu->addAction(tr("Restore Wii Pointer"), this, &MenuBar::RestoreWiiPointer);
 
