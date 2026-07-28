@@ -116,13 +116,21 @@ private:
 class PointerInitialActivation
 {
 public:
-  // Returns true once per emulation session.
+  // Starts one bounded activation sequence per emulation session.
   bool RequestOnce();
   void Complete();
   void Reset();
+  bool IsInProgress() const;
+  bool IsComplete() const;
 
 private:
-  std::atomic<bool> m_started = false;
+  enum class State
+  {
+    Idle,
+    InProgress,
+    Complete,
+  };
+  std::atomic<State> m_state = State::Idle;
 };
 
 struct PointerRecoveryReadiness
@@ -160,6 +168,7 @@ unsigned int RestoreMousePointers(PointerRecoveryTrigger trigger);
 unsigned int ReconnectMouseInput();
 void HandleRendererFocusChanged(bool focused);
 bool HasMousePointerRecoveryEligibleController();
+bool HasUsableMousePointerController();
 bool IsMousePointerRecoveryEligible(const ControllerEmu::EmulatedController* controller,
                                     WiimoteSource source,
                                     const ciface::Core::DeviceContainer& devices);

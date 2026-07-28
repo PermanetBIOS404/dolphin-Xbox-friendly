@@ -5,10 +5,13 @@
 
 #include <optional>
 
+#include <fmt/format.h>
+
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
 #include "Common/Config/Config.h"
 #include "Common/Logging/Log.h"
+#include "Common/PointerE2ETelemetry.h"
 
 #include "Core/Config/WiimoteSettings.h"
 #include "Core/ConfigManager.h"
@@ -23,6 +26,7 @@
 #include "Core/WiiUtils.h"
 
 #include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
+#include "InputCommon/ControllerEmu/ControlGroup/Cursor.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/InputConfig.h"
 
@@ -44,13 +48,16 @@ WiimoteSource GetSource(unsigned int index)
 void OnSourceChanged(unsigned int index, WiimoteSource source)
 {
   const WiimoteSource previous_source = s_wiimote_sources[index].exchange(source);
-
   if (previous_source == source)
   {
     // No change. Do nothing.
     return;
   }
 
+  Common::PointerE2ETelemetry::Log(
+      "wiimote_source_changed",
+      fmt::format("remote={} previous={} current={}", index + 1,
+                  static_cast<int>(previous_source), static_cast<int>(source)));
   WiimoteReal::HandleWiimoteSourceChange(index);
 
   const Core::CPUThreadGuard guard(Core::System::GetInstance());
@@ -102,6 +109,33 @@ HIDWiimote* GetHIDWiimoteSource(unsigned int index)
 namespace Wiimote
 {
 static InputConfig s_config(WIIMOTE_INI_NAME, _trans("Wii Remote"), "Wiimote", "Wiimote");
+
+static void LogPointerConfiguration(std::string_view event, unsigned int index)
+{
+  if (!Common::PointerE2ETelemetry::IsEnabled() ||
+      static_cast<int>(index) >= s_config.GetControllerCount())
+  {
+    return;
+  }
+
+  const auto* const wiimote =
+      static_cast<const WiimoteEmu::Wiimote*>(s_config.GetController(static_cast<int>(index)));
+  const auto* const point = static_cast<const ControllerEmu::Cursor*>(
+      wiimote->GetWiimoteGroup(WiimoteEmu::WiimoteGroup::Point));
+  const auto effective_device =
+      wiimote->ResolveEffectiveMousePointerDevice(g_controller_interface);
+  Common::PointerE2ETelemetry::Log(
+      event,
+      fmt::format(
+          "remote={} source={} default_device='{}' relative={} up='{}' down='{}' left='{}' "
+          "right='{}' effective_device='{}'",
+          index + 1, static_cast<int>(GetSource(index)), wiimote->GetDefaultDevice().ToString(),
+          point->IsRelativeInput(), point->controls[0]->control_ref->GetExpression(),
+          point->controls[1]->control_ref->GetExpression(),
+          point->controls[2]->control_ref->GetExpression(),
+          point->controls[3]->control_ref->GetExpression(),
+          effective_device.value_or("<unresolved>")));
+}
 
 static const char* GetPointerRecoveryTriggerName(PointerRecoveryTrigger trigger)
 {
@@ -159,17 +193,28 @@ void PointerRecoveryRequest::Clear()
 
 bool PointerInitialActivation::RequestOnce()
 {
-  return !m_started.exchange(true);
+  State expected = State::Idle;
+  return m_state.compare_exchange_strong(expected, State::InProgress);
 }
 
 void PointerInitialActivation::Complete()
 {
-  m_started.store(true);
+  m_state.store(State::Complete);
 }
 
 void PointerInitialActivation::Reset()
 {
-  m_started.store(false);
+  m_state.store(State::Idle);
+}
+
+bool PointerInitialActivation::IsInProgress() const
+{
+  return m_state.load() == State::InProgress;
+}
+
+bool PointerInitialActivation::IsComplete() const
+{
+  return m_state.load() == State::Complete;
 }
 
 PointerRecoveryRuntimeResult TryConsumeMousePointerRecovery(unsigned int index,
@@ -316,6 +361,7 @@ void ResetAllWiimotes()
 void LoadConfig()
 {
   s_config.LoadConfig();
+  LogPointerConfiguration("wiimote_config_loaded", 0);
   s_last_connect_request_counter.fill(0);
 }
 
@@ -336,6 +382,13 @@ void Pause()
 
 PointerRecoveryResult RestoreMousePointer(unsigned int index, PointerRecoveryTrigger trigger)
 {
+  Common::PointerE2ETelemetry::Log(
+      "restore_mouse_pointer_enter",
+      fmt::format("remote={} trigger={} core_state={} source={} controller_count={} ciface_init={}",
+                  index + 1, GetPointerRecoveryTriggerName(trigger),
+                  static_cast<int>(Core::GetState(Core::System::GetInstance())),
+                  index < MAX_BBMOTES ? static_cast<int>(GetSource(index)) : -1,
+                  s_config.GetControllerCount(), g_controller_interface.IsInit()));
   if (index >= MAX_WIIMOTES)
     return PointerRecoveryResult::Unavailable;
 
@@ -362,10 +415,13 @@ PointerRecoveryResult RestoreMousePointer(unsigned int index, PointerRecoveryTri
 
   auto* const wiimote =
       static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(static_cast<int>(index)));
+  LogPointerConfiguration("restore_mouse_pointer_configuration", index);
   std::optional<std::string> mouse_device =
       wiimote->ResolveEffectiveMousePointerDevice(g_controller_interface);
   if (!mouse_device)
   {
+    Common::PointerE2ETelemetry::Log("restore_mouse_pointer_ineligible",
+                                     fmt::format("remote={} reason=unresolved_device", index + 1));
     INFO_LOG_FMT(WIIMOTE,
                  "Wii pointer recovery ignored for remote {}: Point is not mouse-controlled",
                  index + 1);
@@ -398,6 +454,10 @@ PointerRecoveryResult RestoreMousePointer(unsigned int index, PointerRecoveryTri
                "absolute cursor refresh prepared and runtime Point reset {}",
                GetPointerRecoveryTriggerName(trigger), index + 1, *mouse_device,
                new_request ? "queued" : "already pending");
+  Common::PointerE2ETelemetry::Log(
+      "restore_mouse_pointer_queued",
+      fmt::format("remote={} trigger={} device='{}' new_request={}", index + 1,
+                  GetPointerRecoveryTriggerName(trigger), *mouse_device, new_request));
   return PointerRecoveryResult::Queued;
 }
 
@@ -464,6 +524,32 @@ bool HasMousePointerRecoveryEligibleController()
     if (static_cast<int>(index) < s_config.GetControllerCount() &&
         IsMousePointerRecoveryEligible(s_config.GetController(static_cast<int>(index)),
                                        GetSource(index), g_controller_interface))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool HasUsableMousePointerController()
+{
+  const Core::State core_state = Core::GetState(Core::System::GetInstance());
+  if (core_state == Core::State::Uninitialized || core_state == Core::State::Stopping)
+    return false;
+
+  for (unsigned int index = 0; index < MAX_WIIMOTES; ++index)
+  {
+    if (static_cast<int>(index) >= s_config.GetControllerCount() ||
+        GetSource(index) != WiimoteSource::Emulated)
+    {
+      continue;
+    }
+
+    const auto* const wiimote =
+        dynamic_cast<const WiimoteEmu::Wiimote*>(s_config.GetController(static_cast<int>(index)));
+    if (wiimote != nullptr &&
+        wiimote->ResolveEffectiveMousePointerDevice(g_controller_interface).has_value() &&
+        wiimote->IsPointerStateUsable())
     {
       return true;
     }

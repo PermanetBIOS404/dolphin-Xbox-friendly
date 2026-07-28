@@ -120,6 +120,8 @@ add_library(common
   OneShotEvent.h
   PcapFile.cpp
   PcapFile.h
+  PointerE2ETelemetry.cpp
+  PointerE2ETelemetry.h
   Profiler.cpp
   Profiler.h
   Projection.h

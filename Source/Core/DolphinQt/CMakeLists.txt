@@ -294,6 +294,7 @@ add_executable(dolphin-emu
   MainWindow.h
   MenuBar.cpp
   MenuBar.h
+  PointerRecoveryWindow.h
   QuickMenu.cpp
   QuickMenu.h
   QuickMenuState.h

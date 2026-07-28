@@ -347,6 +347,8 @@ TEST(WiimotePointerTest, InitialActivationDefersUntilReadyAndRunsOncePerSession)
   };
 
   ASSERT_TRUE(initial_activation.RequestOnce());
+  EXPECT_TRUE(initial_activation.IsInProgress());
+  EXPECT_FALSE(initial_activation.IsComplete());
   ASSERT_TRUE(request.Request());
   EXPECT_FALSE(Wiimote::IsPointerRecoveryReady(readiness));
 
@@ -357,10 +359,14 @@ TEST(WiimotePointerTest, InitialActivationDefersUntilReadyAndRunsOncePerSession)
   EXPECT_EQ(request.TryConsume(true), Wiimote::PointerRecoveryRuntimeResult::Executed);
   initial_activation.Complete();
 
+  EXPECT_FALSE(initial_activation.IsInProgress());
+  EXPECT_TRUE(initial_activation.IsComplete());
   EXPECT_FALSE(initial_activation.RequestOnce());
   EXPECT_EQ(request.TryConsume(true), Wiimote::PointerRecoveryRuntimeResult::NoRequest);
 
   initial_activation.Reset();
+  EXPECT_FALSE(initial_activation.IsInProgress());
+  EXPECT_FALSE(initial_activation.IsComplete());
   EXPECT_TRUE(initial_activation.RequestOnce());
 }
 

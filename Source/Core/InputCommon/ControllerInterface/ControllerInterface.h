@@ -83,6 +83,11 @@ public:
 
   ControllerInterface() : m_is_init(false) {}
   void Initialize(const WindowSystemInfo& wsi);
+  // Isolated native integration tests use this to exercise one real platform backend without
+  // probing unrelated host controller APIs.
+  void InitializeWithBackendsForTesting(
+      const WindowSystemInfo& wsi,
+      std::vector<std::unique_ptr<ciface::InputBackend>> input_backends);
   // Only call from one thread at a time.
   void ChangeWindow(void* hwnd, WindowChangeReason reason = WindowChangeReason::Other);
   // Can be called by any thread at any time (when initialized).
@@ -132,6 +137,8 @@ public:
   WindowSystemInfo GetWindowSystemInfo() const;
 
 private:
+  void InitializeWithBackends(const WindowSystemInfo& wsi,
+                              std::vector<std::unique_ptr<ciface::InputBackend>> input_backends);
   void ClearDevices();
 
   void InvokeDevicesChangedCallbacks();

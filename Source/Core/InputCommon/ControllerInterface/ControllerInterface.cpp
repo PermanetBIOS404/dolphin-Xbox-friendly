@@ -5,8 +5,11 @@
 
 #include <algorithm>
 
+#include <fmt/format.h>
+
 #include "Common/Assert.h"
 #include "Common/Logging/Log.h"
+#include "Common/PointerE2ETelemetry.h"
 #include "Core/HW/WiimoteReal/WiimoteReal.h"
 
 #ifdef CIFACE_USE_WIN32
@@ -52,39 +55,64 @@ void ControllerInterface::Initialize(const WindowSystemInfo& wsi)
   if (m_is_init)
     return;
 
+  std::vector<std::unique_ptr<ciface::InputBackend>> input_backends;
+#ifdef CIFACE_USE_WIN32
+  input_backends.emplace_back(ciface::Win32::CreateInputBackend(this));
+#endif
+#ifdef CIFACE_USE_XLIB
+  input_backends.emplace_back(ciface::XInput2::CreateInputBackend(this));
+#endif
+#ifdef CIFACE_USE_OSX
+  input_backends.emplace_back(ciface::Quartz::CreateInputBackend(this));
+#endif
+#ifdef CIFACE_USE_SDL
+  input_backends.emplace_back(ciface::SDL::CreateInputBackend(this));
+#endif
+#ifdef CIFACE_USE_ANDROID
+  input_backends.emplace_back(ciface::Android::CreateInputBackend(this));
+#endif
+#ifdef CIFACE_USE_EVDEV
+  input_backends.emplace_back(ciface::evdev::CreateInputBackend(this));
+#endif
+#ifdef CIFACE_USE_PIPES
+  input_backends.emplace_back(ciface::Pipes::CreateInputBackend(this));
+#endif
+#ifdef CIFACE_USE_DUALSHOCKUDPCLIENT
+  input_backends.emplace_back(ciface::DualShockUDPClient::CreateInputBackend(this));
+#endif
+#ifdef CIFACE_USE_STEAMDECK
+  input_backends.emplace_back(ciface::SteamDeck::CreateInputBackend(this));
+#endif
+
+  InitializeWithBackends(wsi, std::move(input_backends));
+}
+
+void ControllerInterface::InitializeWithBackendsForTesting(
+    const WindowSystemInfo& wsi,
+    std::vector<std::unique_ptr<ciface::InputBackend>> input_backends)
+{
+  InitializeWithBackends(wsi, std::move(input_backends));
+}
+
+void ControllerInterface::InitializeWithBackends(
+    const WindowSystemInfo& wsi,
+    std::vector<std::unique_ptr<ciface::InputBackend>> input_backends)
+{
+  if (m_is_init)
+    return;
+
   std::lock_guard lk_population(m_devices_population_mutex);
 
   m_wsi = wsi;
+  Common::PointerE2ETelemetry::Log(
+      "controller_interface_initialize",
+      fmt::format("window_type={} render_window={} render_surface={} backend_count={}",
+                  static_cast<int>(wsi.type), wsi.render_window, wsi.render_surface,
+                  input_backends.size()));
 
   m_populating_devices_counter = 1;
 
-#ifdef CIFACE_USE_WIN32
-  m_input_backends.emplace_back(ciface::Win32::CreateInputBackend(this));
-#endif
-#ifdef CIFACE_USE_XLIB
-  m_input_backends.emplace_back(ciface::XInput2::CreateInputBackend(this));
-#endif
-#ifdef CIFACE_USE_OSX
-  m_input_backends.emplace_back(ciface::Quartz::CreateInputBackend(this));
-#endif
-#ifdef CIFACE_USE_SDL
-  m_input_backends.emplace_back(ciface::SDL::CreateInputBackend(this));
-#endif
-#ifdef CIFACE_USE_ANDROID
-  m_input_backends.emplace_back(ciface::Android::CreateInputBackend(this));
-#endif
-#ifdef CIFACE_USE_EVDEV
-  m_input_backends.emplace_back(ciface::evdev::CreateInputBackend(this));
-#endif
-#ifdef CIFACE_USE_PIPES
-  m_input_backends.emplace_back(ciface::Pipes::CreateInputBackend(this));
-#endif
-#ifdef CIFACE_USE_DUALSHOCKUDPCLIENT
-  m_input_backends.emplace_back(ciface::DualShockUDPClient::CreateInputBackend(this));
-#endif
-#ifdef CIFACE_USE_STEAMDECK
-  m_input_backends.emplace_back(ciface::SteamDeck::CreateInputBackend(this));
-#endif
+  m_input_backends = std::move(input_backends);
 
   // Don't allow backends to add devices before the first RefreshDevices() as they will be cleaned
   // there. Or they'd end up waiting on the devices mutex if populated from another thread.
@@ -99,6 +127,9 @@ void ControllerInterface::Initialize(const WindowSystemInfo& wsi)
 
   if (m_populating_devices_counter.fetch_sub(1) == 1 && !devices_empty)
     InvokeDevicesChangedCallbacks();
+  Common::PointerE2ETelemetry::Log(
+      "controller_interface_initialized",
+      fmt::format("devices={} render_window={}", GetAllDevices().size(), m_wsi.render_window));
 }
 
 void ControllerInterface::ChangeWindow(void* hwnd, WindowChangeReason reason)

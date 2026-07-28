@@ -4,6 +4,7 @@
 #include "DolphinQt/MainWindow.h"
 
 #include <QApplication>
+#include <QAction>
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QDesktopServices>
@@ -20,7 +21,9 @@
 
 #include <fmt/format.h>
 
+#include <functional>
 #include <future>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -38,6 +41,7 @@
 #include "Common/Config/Config.h"
 #include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
+#include "Common/PointerE2ETelemetry.h"
 #include "Common/ScopeGuard.h"
 #include "Common/Version.h"
 #include "Common/WindowSystemInfo.h"
@@ -329,6 +333,62 @@ MainWindow::MainWindow(Core::System& system, std::unique_ptr<BootParameters> boo
   }
 
   Host::GetInstance()->SetMainWindowHandle(reinterpret_cast<void*>(winId()));
+  Common::PointerE2ETelemetry::Log(
+      "main_window_ready",
+      fmt::format("main_xid={} render_widget={} render_xid={}", winId(),
+                  static_cast<const void*>(m_render_widget),
+                  m_render_widget != nullptr ? m_render_widget->winId() : 0));
+  if (Common::PointerE2ETelemetry::IsEnabled() &&
+      qEnvironmentVariableIsSet("DOLPHIN_POINTER_E2E_AUTO_BOOT"))
+  {
+    auto attempts = std::make_shared<unsigned int>(0);
+    auto trigger_system_menu = std::make_shared<std::function<void()>>();
+    *trigger_system_menu = [this, attempts, trigger_system_menu] {
+      QAction* const action =
+          m_menu_bar->findChild<QAction*>(QStringLiteral("actionLoadWiiSystemMenu"));
+      if (action != nullptr && action->isEnabled())
+      {
+        Common::PointerE2ETelemetry::Log(
+            "system_menu_action_triggered",
+            fmt::format("text='{}' enabled={}", action->text().toStdString(), action->isEnabled()));
+        action->trigger();
+        *trigger_system_menu = {};
+        return;
+      }
+
+      if (++*attempts >= 100)
+      {
+        Common::PointerE2ETelemetry::Log("system_menu_action_failed",
+                                         "reason=action_not_enabled");
+        *trigger_system_menu = {};
+        return;
+      }
+      QTimer::singleShot(50, this, *trigger_system_menu);
+    };
+    QTimer::singleShot(0, this, *trigger_system_menu);
+  }
+  if (Common::PointerE2ETelemetry::IsEnabled() &&
+      qEnvironmentVariableIsSet("DOLPHIN_POINTER_E2E_AUTO_QUICK_MENU"))
+  {
+    auto triggered = std::make_shared<bool>(false);
+    connect(&Settings::Instance(), &Settings::EmulationStateChanged, this,
+            [this, triggered](Core::State state) {
+              if (state != Core::State::Running || *triggered)
+                return;
+
+              *triggered = true;
+              QTimer::singleShot(5000, this, [this] {
+                QAction* const action =
+                    m_menu_bar->findChild<QAction*>(QStringLiteral("actionDolphinQuickMenu"));
+                Common::PointerE2ETelemetry::Log(
+                    "quick_menu_action_automation",
+                    fmt::format("found={} enabled={}", action != nullptr,
+                                action != nullptr && action->isEnabled()));
+                if (action != nullptr && action->isEnabled())
+                  action->trigger();
+              });
+            });
+  }
 
   if (m_pending_boot != nullptr)
   {
@@ -755,6 +815,11 @@ void MainWindow::ConnectHost()
 void MainWindow::OpenQuickMenu()
 {
   const Core::State state = Core::GetState(m_system);
+  Common::PointerE2ETelemetry::Log(
+      "quick_menu_mainwindow_request",
+      fmt::format("core_state={} render_widget={} render_visible={}", static_cast<int>(state),
+                  static_cast<const void*>(m_render_widget),
+                  m_render_widget != nullptr && m_render_widget->isVisible()));
   INFO_LOG_FMT(COMMON,
                "MainWindow Quick Menu handler entered: core_state={}, render_widget={}, "
                "render_visible={}",

@@ -3,6 +3,7 @@
 
 #include "DolphinQt/QuickMenu.h"
 
+#include <QApplication>
 #include <QEvent>
 #include <QFrame>
 #include <QHideEvent>
@@ -13,7 +14,10 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <fmt/format.h>
+
 #include "Common/Logging/Log.h"
+#include "Common/PointerE2ETelemetry.h"
 
 QuickMenu::QuickMenu(QWidget* render_widget)
     : QWidget(render_widget, Qt::Tool | Qt::FramelessWindowHint), m_render_widget(render_widget),
@@ -95,6 +99,11 @@ QuickMenu::QuickMenu(QWidget* render_widget)
                "overlay_is_window={}",
                static_cast<const void*>(this), static_cast<const void*>(render_widget),
                render_widget->isWindow(), isWindow());
+  Common::PointerE2ETelemetry::Log(
+      "quick_menu_created",
+      fmt::format("object={} parent={} parent_xid={} overlay_is_window={}",
+                  static_cast<const void*>(this), static_cast<const void*>(render_widget),
+                  render_widget->winId(), isWindow()));
 }
 
 QRect QuickMenu::GetTargetGeometry() const
@@ -153,7 +162,31 @@ bool QuickMenu::Open()
                "geometry=({},{} {}x{})",
                winId(), isVisible(), isHidden(), geometry().x(), geometry().y(), geometry().width(),
                geometry().height());
+  Common::PointerE2ETelemetry::Log(
+      "quick_menu_show_requested",
+      fmt::format("xid={} visible={} hidden={} geometry={},{},{}x{}", winId(), isVisible(),
+                  isHidden(), geometry().x(), geometry().y(), geometry().width(),
+                  geometry().height()));
   QTimer::singleShot(0, this, [this] {
+    const auto button_geometry = [this](const char* object_name) {
+      const auto* const button = findChild<QPushButton*>(QString::fromLatin1(object_name));
+      return button != nullptr ? QRect(button->mapToGlobal(QPoint{}), button->size()) : QRect{};
+    };
+    const QRect resume_geometry = button_geometry("quickMenuResumeButton");
+    const QRect restore_geometry = button_geometry("quickMenuRestorePointerButton");
+    const QRect reconnect_geometry = button_geometry("quickMenuReconnectMouseButton");
+    Common::PointerE2ETelemetry::Log(
+        "quick_menu_post_event",
+        fmt::format(
+            "xid={} requested={} visible={} hidden={} active={} geometry={},{},{}x{} "
+            "resume_geometry={},{},{}x{} restore_geometry={},{},{}x{} "
+            "reconnect_geometry={},{},{}x{}",
+            winId(), m_open_requested, isVisible(), isHidden(), isActiveWindow(), geometry().x(),
+            geometry().y(), geometry().width(), geometry().height(), resume_geometry.x(),
+            resume_geometry.y(), resume_geometry.width(), resume_geometry.height(),
+            restore_geometry.x(), restore_geometry.y(), restore_geometry.width(),
+            restore_geometry.height(), reconnect_geometry.x(), reconnect_geometry.y(),
+            reconnect_geometry.width(), reconnect_geometry.height()));
     INFO_LOG_FMT(COMMON,
                  "Quick Menu post-event visibility: requested={}, visible={}, hidden={}, "
                  "active_window={}, geometry=({},{} {}x{})",
@@ -169,9 +202,20 @@ void QuickMenu::Close()
     return;
 
   m_open_requested = false;
+  Common::PointerE2ETelemetry::Log(
+      "quick_menu_close_requested",
+      fmt::format("xid={} visible={} hidden={} active={} active_window={} focus_widget={}", winId(),
+                  isVisible(), isHidden(), isActiveWindow(),
+                  static_cast<const void*>(QApplication::activeWindow()),
+                  static_cast<const void*>(QApplication::focusWidget())));
   INFO_LOG_FMT(COMMON, "Quick Menu close requested: visible={}, hidden={}", isVisible(),
                isHidden());
   hide();
+  const WId closed_window_id = internalWinId();
+  destroy();
+  Common::PointerE2ETelemetry::Log(
+      "quick_menu_native_window_destroyed",
+      fmt::format("closed_xid={} current_xid={}", closed_window_id, internalWinId()));
 }
 
 bool QuickMenu::eventFilter(QObject* watched, QEvent* event)
@@ -196,6 +240,13 @@ bool QuickMenu::eventFilter(QObject* watched, QEvent* event)
 
 void QuickMenu::hideEvent(QHideEvent* event)
 {
+  Common::PointerE2ETelemetry::Log(
+      "quick_menu_hide_event",
+      fmt::format("xid={} requested={} visible={} hidden={} active={} active_window={} "
+                  "focus_widget={}",
+                  winId(), m_open_requested, isVisible(), isHidden(), isActiveWindow(),
+                  static_cast<const void*>(QApplication::activeWindow()),
+                  static_cast<const void*>(QApplication::focusWidget())));
   INFO_LOG_FMT(COMMON, "Quick Menu hide event: requested={}, visible={}, hidden={}",
                m_open_requested, isVisible(), isHidden());
   QWidget::hideEvent(event);

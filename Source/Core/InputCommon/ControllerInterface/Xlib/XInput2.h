@@ -138,6 +138,7 @@ private:
   const int keyboard_deviceid;
   const double scroll_increment;
   u64 m_cursor_refresh_generation = 0;
+  unsigned int m_e2e_cursor_samples = 0;
   std::string name;
 };
 }  // namespace ciface::XInput2

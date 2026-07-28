@@ -16,6 +16,9 @@ if(ENABLE_QT)
 
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(X11 REQUIRED)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(X11_INPUT_TEST REQUIRED IMPORTED_TARGET xi)
+    pkg_check_modules(X11_XTEST REQUIRED IMPORTED_TARGET xtst)
     add_executable(QuickMenuNativeTest EXCLUDE_FROM_ALL
       ../DolphinQt/QuickMenuNativeTest.cpp
       ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/QuickMenu.cpp
@@ -34,6 +37,37 @@ if(ENABLE_QT)
         $<TARGET_FILE:QuickMenuNativeTest>
         ${CMAKE_BINARY_DIR}
       DEPENDS QuickMenuNativeTest
+      USES_TERMINAL
+    )
+
+    add_executable(PointerRecoveryNativeTest EXCLUDE_FROM_ALL
+      ../DolphinQt/PointerRecoveryNativeTest.cpp
+      ../StubHost.cpp
+      ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/QuickMenu.cpp
+      ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/QuickMenu.h
+      ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/PointerRecoveryWindow.h
+    )
+    set_target_properties(PointerRecoveryNativeTest PROPERTIES
+      AUTOMOC ON
+      FOLDER Tests
+    )
+    target_include_directories(PointerRecoveryNativeTest PRIVATE ${CMAKE_SOURCE_DIR}/Source/Core)
+    target_link_libraries(PointerRecoveryNativeTest PRIVATE
+      core
+      uicommon
+      Qt6::Test
+      Qt6::Widgets
+      X11::X11
+      PkgConfig::X11_INPUT_TEST
+      PkgConfig::X11_XTEST
+    )
+
+    add_custom_target(pointer-recovery-native-test
+      COMMAND
+        ${CMAKE_SOURCE_DIR}/Tools/test-pointer-recovery-xvfb.sh
+        $<TARGET_FILE:PointerRecoveryNativeTest>
+        ${CMAKE_BINARY_DIR}
+      DEPENDS PointerRecoveryNativeTest
       USES_TERMINAL
     )
   endif()

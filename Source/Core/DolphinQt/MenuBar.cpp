@@ -333,6 +333,7 @@ void MenuBar::AddToolsMenu()
 
   // Label will be set by a NANDRefresh later
   m_boot_sysmenu = tools_menu->addAction(QString{}, this, [this] { emit BootWiiSystemMenu(); });
+  m_boot_sysmenu->setObjectName(QStringLiteral("actionLoadWiiSystemMenu"));
   m_wad_install_action = tools_menu->addAction(tr("Install WAD..."), this, &MenuBar::InstallWAD);
   m_manage_nand_menu = tools_menu->addMenu(tr("Manage NAND"));
   m_import_backup = m_manage_nand_menu->addAction(tr("Import BootMii NAND Backup..."), this,
@@ -400,7 +401,7 @@ void MenuBar::AddEmulationMenu()
 
   m_screenshot_action = emu_menu->addAction(tr("Take Screenshot"), this, &MenuBar::Screenshot);
   m_quick_menu_action =
-      emu_menu->addAction(tr("Dolphin Quick Menu"), this, &MenuBar::OpenQuickMenu);
+      emu_menu->addAction(tr("&Dolphin Quick Menu"), this, &MenuBar::OpenQuickMenu);
   m_quick_menu_action->setObjectName(QStringLiteral("actionDolphinQuickMenu"));
   connect(m_quick_menu_action, &QAction::triggered, this, [] {
     INFO_LOG_FMT(COMMON, "Emulation menu QAction triggered: Dolphin Quick Menu");

@@ -4,12 +4,17 @@
 #include "Core/HW/WiimoteEmu/Dynamics.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <optional>
 
+#include <fmt/format.h>
+
 #include "Common/MathUtil.h"
+#include "Common/PointerE2ETelemetry.h"
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/HW/WiimoteEmu/WiimoteEmu.h"
+#include "InputCommon/ControlReference/ControlReference.h"
 #include "InputCommon/ControllerEmu/ControlGroup/Cursor.h"
 #include "InputCommon/ControllerEmu/ControlGroup/Force.h"
 #include "InputCommon/ControllerEmu/ControlGroup/IMUAccelerometer.h"
@@ -225,6 +230,21 @@ void EmulatePoint(MotionState* state, ControllerEmu::Cursor* ir_group,
                   const ControllerEmu::InputOverrideFunction& override_func, float time_elapsed)
 {
   const auto cursor = ir_group->GetState(true, override_func);
+  if (Common::PointerE2ETelemetry::IsEnabled())
+  {
+    static std::atomic<unsigned int> sample_count;
+    static std::atomic<int> last_visible{-1};
+    const unsigned int sample = sample_count.fetch_add(1);
+    const int visible = cursor.IsVisible() ? 1 : 0;
+    const int previous_visible = last_visible.exchange(visible);
+    if (sample < 12 || previous_visible != visible)
+    {
+      Common::PointerE2ETelemetry::Log(
+          "cursor_point_sample",
+          fmt::format("sample={} input_gate={} hidden={} cursor_x={} cursor_y={}", sample,
+                      ControlReference::GetInputGate(), !cursor.IsVisible(), cursor.x, cursor.y));
+    }
+  }
 
   if (!cursor.IsVisible())
   {

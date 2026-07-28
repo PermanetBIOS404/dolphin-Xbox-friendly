@@ -55,9 +55,12 @@ private:
   void OnKeepOnTopChanged(bool top);
   void UpdateCursor();
   void QueueWiiPointerRecovery();
+  void QueueInitialPointerActivationValidation();
   void TryWiiPointerRecovery();
   void EnsureQuickMenu();
   void CloseQuickMenu(QuickMenuAction action);
+  void RequestQuickMenuFocusRestoration();
+  void CompleteQuickMenuCloseAfterFocus();
   void PassEventToPresenter(const QEvent* event);
   void SetPresenterKeyMap();
   void dragEnterEvent(QDragEnterEvent* event) override;
@@ -78,8 +81,13 @@ private:
   bool m_wii_pointer_recovery_queued = false;
   bool m_wii_pointer_recovery_manual = false;
   bool m_wii_pointer_recovery_initial = false;
+  bool m_initial_pointer_activation_validation_queued = false;
+  bool m_initial_pointer_activation_prepared = false;
+  unsigned int m_initial_pointer_activation_attempts = 0;
   Wiimote::PointerInitialActivation m_initial_pointer_activation;
   QuickMenu* m_quick_menu = nullptr;
   QuickMenuSession m_quick_menu_session;
+  std::optional<QuickMenuAction> m_pending_quick_menu_action;
+  bool m_resume_emulation_after_quick_menu_focus = false;
   MouseInputReconnectRequest m_mouse_reconnect_request;
 };

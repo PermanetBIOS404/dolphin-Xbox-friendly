@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <numeric>
 #include <optional>
 #include <string>
@@ -163,6 +164,7 @@ public:
   // qualify the device or use this controller's selected default device.
   std::optional<std::string>
   ResolveEffectiveMousePointerDevice(const ciface::Core::DeviceContainer& devices) const;
+  bool IsPointerStateUsable() const;
   void ResetPointerState();
 
   void PrepareInput(WiimoteEmu::DesiredWiimoteState* target_state,
@@ -351,6 +353,7 @@ private:
   MotionState m_swing_state;
   RotationalState m_tilt_state;
   MotionState m_point_state;
+  std::atomic<bool> m_pointer_state_usable = false;
   PositionalState m_shake_state;
 
   IMUCursorState m_imu_cursor_state;

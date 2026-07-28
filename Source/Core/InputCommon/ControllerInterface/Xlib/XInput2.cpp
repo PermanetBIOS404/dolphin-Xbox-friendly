@@ -14,6 +14,7 @@
 #include <fmt/format.h>
 
 #include "Common/Logging/Log.h"
+#include "Common/PointerE2ETelemetry.h"
 
 #include "Core/Host.h"
 
@@ -201,6 +202,10 @@ KeyboardMouse::KeyboardMouse(Window window, int opcode, int pointer, int keyboar
                "New XInput2 mouse backend created for device '{}' (pointer id {}, render window "
                "{})",
                name, pointer_deviceid, m_window);
+  Common::PointerE2ETelemetry::Log(
+      "xinput2_backend_created",
+      fmt::format("device={} pointer_id={} keyboard_id={} render_window={}", name,
+                  pointer_deviceid, keyboard_deviceid, m_window));
 
   // Tell core X functions which keyboard is "the" keyboard for this
   // X connection.
@@ -319,6 +324,9 @@ bool KeyboardMouse::UpdateCursor(bool should_center_mouse)
     if (!XIQueryPointer(m_display, pointer_deviceid, m_window, &root, &child, &root_x, &root_y,
                         &win_x, &win_y, &button_state, &mods, &group))
     {
+      Common::PointerE2ETelemetry::Log(
+          "xinput2_query_pointer",
+          fmt::format("success=false device={} render_window={}", name, m_window));
       WARN_LOG_FMT(CONTROLLERINTERFACE,
                    "XInput2 absolute cursor query failed for mouse device '{}' on render window {}",
                    name, m_window);
@@ -351,6 +359,16 @@ bool KeyboardMouse::UpdateCursor(bool should_center_mouse)
   // the mouse position as a range from -1 to 1
   m_state.cursor.x = (win_x / win_width * 2 - 1) * window_scale.x;
   m_state.cursor.y = (win_y / win_height * 2 - 1) * window_scale.y;
+  if (Common::PointerE2ETelemetry::IsEnabled() && m_e2e_cursor_samples++ < 16)
+  {
+    Common::PointerE2ETelemetry::Log(
+        "xinput2_query_pointer",
+        fmt::format(
+            "success=true device={} render_window={} root_x={} root_y={} window_x={} "
+            "window_y={} width={} height={} cursor_x={} cursor_y={}",
+            name, m_window, root_x, root_y, win_x, win_y, win_width, win_height, m_state.cursor.x,
+            m_state.cursor.y));
+  }
   return true;
 }
 
@@ -459,6 +477,10 @@ Core::DeviceRemoval KeyboardMouse::UpdateInput()
     if (should_refresh_cursor)
     {
       m_cursor_refresh_generation = cursor_refresh_generation;
+      Common::PointerE2ETelemetry::Log(
+          "xinput2_absolute_refresh",
+          fmt::format("success={} device={} render_window={} cursor_x={} cursor_y={}", refreshed,
+                      name, m_window, m_state.cursor.x, m_state.cursor.y));
       INFO_LOG_FMT(CONTROLLERINTERFACE,
                    "XInput2 {} absolute Wii pointer cursor refresh for mouse device '{}' on "
                    "render window {}; cursor=({}, {})",
