@@ -22,6 +22,7 @@
 #include "Common/FileUtil.h"
 #include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
+#include "Common/PointerE2ETelemetry.h"
 
 #include "Core/AchievementManager.h"
 #include "Core/CommonTitles.h"
@@ -403,7 +404,12 @@ void MenuBar::AddEmulationMenu()
   m_quick_menu_action =
       emu_menu->addAction(tr("&Dolphin Quick Menu"), this, &MenuBar::OpenQuickMenu);
   m_quick_menu_action->setObjectName(QStringLiteral("actionDolphinQuickMenu"));
-  connect(m_quick_menu_action, &QAction::triggered, this, [] {
+  connect(m_quick_menu_action, &QAction::triggered, this, [this] {
+    Common::PointerE2ETelemetry::Log(
+        "quick_menu_qaction_triggered",
+        fmt::format("object_name='{}' enabled={}",
+                    m_quick_menu_action->objectName().toStdString(),
+                    m_quick_menu_action->isEnabled()));
     INFO_LOG_FMT(COMMON, "Emulation menu QAction triggered: Dolphin Quick Menu");
   });
   m_restore_wii_pointer_action =

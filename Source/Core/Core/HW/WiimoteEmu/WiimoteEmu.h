@@ -164,6 +164,12 @@ public:
   // qualify the device or use this controller's selected default device.
   std::optional<std::string>
   ResolveEffectiveMousePointerDevice(const ciface::Core::DeviceContainer& devices) const;
+  struct PointerStateStatus
+  {
+    bool finite = false;
+    bool visible = false;
+  };
+  PointerStateStatus GetPointerStateStatus() const;
   bool IsPointerStateUsable() const;
   void ResetPointerState();
 
@@ -353,6 +359,8 @@ private:
   MotionState m_swing_state;
   RotationalState m_tilt_state;
   MotionState m_point_state;
+  std::atomic<bool> m_pointer_state_finite = false;
+  std::atomic<bool> m_pointer_state_visible = false;
   std::atomic<bool> m_pointer_state_usable = false;
   PositionalState m_shake_state;
 

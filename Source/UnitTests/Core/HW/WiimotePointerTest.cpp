@@ -315,6 +315,7 @@ TEST(WiimotePointerTest, ModalAndRenderReadinessDefersRecovery)
       .no_active_modal = false,
       .render_widget_focused = true,
       .host_renderer_focused = true,
+      .input_gate_open = true,
       .input_backend_valid = true,
   };
   EXPECT_FALSE(Wiimote::IsPointerRecoveryReady(readiness));
@@ -328,11 +329,37 @@ TEST(WiimotePointerTest, ModalAndRenderReadinessDefersRecovery)
   EXPECT_FALSE(Wiimote::IsPointerRecoveryReady(readiness));
 
   readiness.host_renderer_focused = true;
+  readiness.input_gate_open = false;
+  EXPECT_FALSE(Wiimote::IsPointerRecoveryReady(readiness));
+
+  readiness.input_gate_open = true;
   readiness.input_backend_valid = false;
   EXPECT_FALSE(Wiimote::IsPointerRecoveryReady(readiness));
 
   readiness.input_backend_valid = true;
   EXPECT_TRUE(Wiimote::IsPointerRecoveryReady(readiness));
+}
+
+TEST(WiimotePointerTest, PointerRecoveryValidationRequiresACompleteUsableResult)
+{
+  Wiimote::PointerRecoveryValidationResult result{
+      .input_gate_open = true,
+      .eligible_controllers = 1,
+      .finite_point_controllers = 1,
+      .visible_point_controllers = 1,
+      .valid_ir_controllers = 0,
+      .usable_controllers = 0,
+  };
+  EXPECT_FALSE(result.IsUsable());
+
+  result.valid_ir_controllers = 1;
+  EXPECT_FALSE(result.IsUsable());
+
+  result.usable_controllers = 1;
+  EXPECT_TRUE(result.IsUsable());
+
+  result.eligible_controllers = 0;
+  EXPECT_FALSE(result.IsUsable());
 }
 
 TEST(WiimotePointerTest, InitialActivationDefersUntilReadyAndRunsOncePerSession)
@@ -343,6 +370,7 @@ TEST(WiimotePointerTest, InitialActivationDefersUntilReadyAndRunsOncePerSession)
       .no_active_modal = false,
       .render_widget_focused = true,
       .host_renderer_focused = true,
+      .input_gate_open = true,
       .input_backend_valid = true,
   };
 
@@ -445,6 +473,23 @@ TEST(WiimotePointerTest, RuntimeRecoveryHotkeyUsesUniqueOrdinaryKeyCombination)
       Wiimote::IsMousePointerRecoveryEligible(&unqualified, WiimoteSource::Emulated, devices));
 }
 
+TEST(WiimotePointerTest, QuickMenuRouteIsAbsentFromControllerHotkeyManager)
+{
+  ControllerInterface controller_interface;
+  HotkeyManager hotkeys;
+  hotkeys.LoadDefaults(controller_interface);
+
+  for (int group_index = 0; group_index < NUM_HOTKEY_GROUPS; ++group_index)
+  {
+    const auto* const group = hotkeys.GetHotkeyGroup(static_cast<HotkeyGroup>(group_index));
+    for (const auto& control : group->controls)
+    {
+      EXPECT_NE(control->name, "Open Dolphin Quick Menu");
+      EXPECT_NE(control->ui_name, "Open Dolphin Quick Menu");
+    }
+  }
+}
+
 TEST(WiimotePointerTest, AllControlEntryPointsUseSharedManualRuntimeRecovery)
 {
   EXPECT_EQ(Wiimote::GetPointerRecoveryTriggerForEntryPoint(
@@ -459,33 +504,6 @@ TEST(WiimotePointerTest, AllControlEntryPointsUseSharedManualRuntimeRecovery)
   EXPECT_EQ(Wiimote::GetPointerRecoveryTriggerForEntryPoint(
                 Wiimote::PointerRecoveryEntryPoint::QuickMenu),
             Wiimote::PointerRecoveryTrigger::Manual);
-}
-
-TEST(WiimotePointerTest, QuickMenuHotkeyUsesUniqueNonFunctionKeyCombination)
-{
-  ControllerInterface controller_interface;
-  HotkeyManager hotkeys;
-  hotkeys.LoadDefaults(controller_interface);
-
-  const auto* const general_group =
-      static_cast<const ControllerEmu::Buttons*>(hotkeys.GetHotkeyGroup(HKGP_GENERAL));
-  const int quick_menu_index = hotkeys.GetIndexForGroup(HKGP_GENERAL, HK_OPEN_QUICK_MENU);
-  const std::string quick_menu_expression =
-      general_group->controls[quick_menu_index]->control_ref->GetExpression();
-  EXPECT_EQ(quick_menu_expression, "@(Ctrl+Shift+Space)");
-  EXPECT_NE(quick_menu_expression, "@(Shift+Tab)");
-
-  std::size_t expression_count = 0;
-  for (int group_index = 0; group_index < NUM_HOTKEY_GROUPS; ++group_index)
-  {
-    const auto* const group = hotkeys.GetHotkeyGroup(static_cast<HotkeyGroup>(group_index));
-    for (const auto& control : group->controls)
-    {
-      if (control->control_ref->GetExpression() == quick_menu_expression)
-        ++expression_count;
-    }
-  }
-  EXPECT_EQ(expression_count, 1);
 }
 
 TEST(WiimotePointerTest, QuickMenuSessionUsesHostInputAndAlwaysReleasesItsGate)
@@ -540,6 +558,7 @@ TEST(WiimotePointerTest, QuickMenuCloseStillWaitsForRealRenderReadiness)
       .no_active_modal = true,
       .render_widget_focused = false,
       .host_renderer_focused = true,
+      .input_gate_open = true,
       .input_backend_valid = true,
   };
   EXPECT_FALSE(Wiimote::IsPointerRecoveryReady(readiness));

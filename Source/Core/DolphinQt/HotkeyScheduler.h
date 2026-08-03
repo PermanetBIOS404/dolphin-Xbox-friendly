@@ -32,7 +32,6 @@ signals:
   void FullScreenHotkey();
   void StopHotkey();
   void ResetHotkey();
-  void OpenQuickMenu();
   void TogglePauseHotkey();
   void ScreenShotHotkey();
   void RefreshGameListHotkey();

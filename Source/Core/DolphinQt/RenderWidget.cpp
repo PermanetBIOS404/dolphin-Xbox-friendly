@@ -60,6 +60,67 @@ static const char* GetPointerRecoveryTriggerName(Wiimote::PointerRecoveryTrigger
   return "unknown";
 }
 
+static bool IsQuickMenuRecoveryAction(QuickMenuAction action)
+{
+  return action == QuickMenuAction::Resume || action == QuickMenuAction::RestoreWiiPointer ||
+         action == QuickMenuAction::ReconnectMouseInput ||
+         action == QuickMenuAction::RebootEmulation;
+}
+
+struct QuickMenuFocusReadiness
+{
+  bool modal_clear = false;
+  bool menu_hidden = false;
+  bool menu_native_gone = false;
+  bool active_window_owner = false;
+  bool render_active = false;
+  bool focus_window_owner = false;
+  bool render_focused = false;
+  bool host_focused = false;
+  bool input_gate_open = false;
+
+  bool IsReady() const
+  {
+    return modal_clear && menu_hidden && menu_native_gone && active_window_owner &&
+           render_active && focus_window_owner && render_focused && host_focused &&
+           input_gate_open;
+  }
+};
+
+static QuickMenuFocusReadiness GetQuickMenuFocusReadiness(const RenderWidget* render_widget,
+                                                          const QuickMenu* quick_menu)
+{
+  const QWidget* const owner = render_widget->window();
+  const QWindow* const owner_window = owner->windowHandle();
+  return {
+      .modal_clear = QApplication::activeModalWidget() == nullptr,
+      .menu_hidden = quick_menu == nullptr || (!quick_menu->isVisible() && quick_menu->isHidden()),
+      .menu_native_gone =
+          quick_menu == nullptr ||
+          (quick_menu->internalWinId() == 0 && !quick_menu->isActiveWindow()),
+      .active_window_owner = QApplication::activeWindow() == owner,
+      .render_active = render_widget->isActiveWindow(),
+      .focus_window_owner =
+          owner_window != nullptr && QGuiApplication::focusWindow() == owner_window,
+      .render_focused = render_widget->hasFocus(),
+      .host_focused = Host_RendererHasFocus(),
+      .input_gate_open = ControlReference::GetInputGate(),
+  };
+}
+
+static bool IsForcedE2EQuickMenuTransaction(const char* environment_variable,
+                                            unsigned int transaction_count)
+{
+  if (!Common::PointerE2ETelemetry::IsEnabled())
+    return false;
+
+  bool value_valid = false;
+  const int requested_transaction =
+      qEnvironmentVariableIntValue(environment_variable, &value_valid);
+  return value_valid && requested_transaction > 0 &&
+         transaction_count == static_cast<unsigned int>(requested_transaction);
+}
+
 static void LogQuickMenuFocusState(std::string_view event, const RenderWidget* render_widget,
                                    const QuickMenu* quick_menu)
 {
@@ -148,6 +209,8 @@ RenderWidget::RenderWidget(QWidget* parent) : QWidget(parent)
     }
     else if (state == Core::State::Starting || state == Core::State::Uninitialized)
     {
+      if (m_quick_menu_session.IsOpen())
+        CloseQuickMenu(QuickMenuAction::Resume);
       m_initial_pointer_activation.Reset();
       m_initial_pointer_activation_validation_queued = false;
       m_initial_pointer_activation_prepared = false;
@@ -155,9 +218,17 @@ RenderWidget::RenderWidget(QWidget* parent) : QWidget(parent)
       m_wii_pointer_recovery_pending = false;
       m_wii_pointer_recovery_manual = false;
       m_wii_pointer_recovery_initial = false;
+      m_pending_quick_menu_action.reset();
+      m_resume_emulation_after_quick_menu_focus = false;
+      m_quick_menu_recovery_operation_started = false;
+      m_quick_menu_forced_failure_consumed = false;
+      m_quick_menu_recovery_validation_successes = 0;
+      m_quick_menu_recovery_transaction_count = 0;
+      m_quick_menu_focus_restoration_phase.Cancel();
+      m_quick_menu_recovery_validation_phase.Cancel();
+      m_quick_menu_focus_timer_generation.reset();
+      m_quick_menu_recovery_timer_generation.reset();
       m_mouse_reconnect_request.Clear();
-      if (m_quick_menu_session.IsOpen())
-        CloseQuickMenu(QuickMenuAction::Resume);
     }
   });
 
@@ -294,6 +365,7 @@ void RenderWidget::ToggleQuickMenu()
     return;
 
   EnsureQuickMenu();
+  m_quick_menu->SetStatusMessage({});
   SetCursorLocked(false);
   if (!m_quick_menu->Open())
   {
@@ -342,64 +414,155 @@ void RenderWidget::CloseQuickMenu(QuickMenuAction action)
                "Dolphin Quick Menu closed: visible={}, hidden={}; deferring action and pause-state "
                "restoration until native render focus returns",
                m_quick_menu->isVisible(), m_quick_menu->isHidden());
-  RequestQuickMenuFocusRestoration();
+  StartQuickMenuFocusRestorationTransaction();
 }
 
-void RenderWidget::RequestQuickMenuFocusRestoration()
+void RenderWidget::StartQuickMenuFocusRestorationTransaction()
 {
-  QTimer::singleShot(0, this, [this] {
-    if (!m_pending_quick_menu_action || m_quick_menu_session.IsOpen() ||
-        (m_quick_menu != nullptr && m_quick_menu->isVisible()))
-    {
-      return;
-    }
+  if (!m_pending_quick_menu_action)
+    return;
 
-    LogQuickMenuFocusState("quick_menu_focus_callback_enter", this, m_quick_menu);
-    // The top-level Tool has its own native window. Ensure its hide/destruction has reached the
-    // window system before asking the owner to activate, otherwise X11 can apply the delayed Tool
-    // focus transition after the render window has already received WindowActivate.
-    QGuiApplication::sync();
-    QWidget* const owner = window();
-    owner->raise();
-    owner->activateWindow();
-    if (QWindow* const owner_window = owner->windowHandle())
-      owner_window->requestActivate();
-    setFocus(Qt::OtherFocusReason);
-    LogQuickMenuFocusState("quick_menu_focus_activation_requested", this, m_quick_menu);
-    INFO_LOG_FMT(COMMON,
-                 "Quick Menu requested native render activation: owner={}, owner_window={}, "
-                 "render_has_focus={}, host_renderer_focus={}",
-                 static_cast<const void*>(owner), static_cast<const void*>(owner->windowHandle()),
-                 hasFocus(), Host_RendererHasFocus());
+  m_quick_menu_recovery_validation_phase.Cancel();
+  m_quick_menu_recovery_timer_generation.reset();
+  m_quick_menu_recovery_operation_started = false;
+  m_quick_menu_recovery_validation_successes = 0;
+  if (IsQuickMenuRecoveryAction(*m_pending_quick_menu_action))
+    ++m_quick_menu_recovery_transaction_count;
 
-    // Some platforms deliver activation synchronously. Normally completion happens from the
-    // subsequent WindowActivate or focusWindowChanged event.
-    CompleteQuickMenuCloseAfterFocus();
+  const std::uint64_t generation = m_quick_menu_focus_restoration_phase.Start();
+  Common::PointerE2ETelemetry::Log(
+      "quick_menu_focus_transaction_started",
+      fmt::format("generation={} transaction={} action={} core_state={}", generation,
+                  m_quick_menu_recovery_transaction_count,
+                  static_cast<int>(*m_pending_quick_menu_action),
+                  static_cast<int>(Core::GetState(Core::System::GetInstance()))));
+  QueueQuickMenuFocusRestoration(generation, 0);
+}
+
+void RenderWidget::QueueQuickMenuFocusRestoration(std::uint64_t generation, int delay_ms)
+{
+  if (!m_quick_menu_focus_restoration_phase.IsCurrent(generation) ||
+      m_quick_menu_focus_timer_generation == generation)
+    return;
+
+  m_quick_menu_focus_timer_generation = generation;
+  QTimer::singleShot(delay_ms, this, [this, generation] {
+    if (m_quick_menu_focus_timer_generation == generation)
+      m_quick_menu_focus_timer_generation.reset();
+    EvaluateQuickMenuFocusRestoration(generation, true);
   });
 }
 
-void RenderWidget::CompleteQuickMenuCloseAfterFocus()
+void RenderWidget::RequestNativeRenderActivation()
 {
-  if (!m_pending_quick_menu_action || m_quick_menu_session.IsOpen() ||
-      (m_quick_menu != nullptr && m_quick_menu->isVisible()) ||
-      QApplication::activeModalWidget() != nullptr)
-  {
-    return;
-  }
-
+  LogQuickMenuFocusState("quick_menu_focus_callback_enter", this, m_quick_menu);
+  // The top-level Tool has its own native window. Ensure its hide/destruction has reached the
+  // window system before asking the owner to activate, otherwise X11 can apply the delayed Tool
+  // focus transition after the render window has already received WindowActivate.
+  QGuiApplication::sync();
   QWidget* const owner = window();
-  const QWindow* const owner_window = owner->windowHandle();
-  if (!isActiveWindow() || owner_window == nullptr ||
-      QGuiApplication::focusWindow() != owner_window || !Host_RendererHasFocus())
+  owner->raise();
+  owner->activateWindow();
+  if (QWindow* const owner_window = owner->windowHandle())
+    owner_window->requestActivate();
+  setFocus(Qt::OtherFocusReason);
+  LogQuickMenuFocusState("quick_menu_focus_activation_requested", this, m_quick_menu);
+  INFO_LOG_FMT(COMMON,
+               "Quick Menu requested native render activation: owner={}, owner_window={}, "
+               "render_has_focus={}, host_renderer_focus={}",
+               static_cast<const void*>(owner), static_cast<const void*>(owner->windowHandle()),
+               hasFocus(), Host_RendererHasFocus());
+}
+
+void RenderWidget::EvaluateQuickMenuFocusRestoration(std::uint64_t generation,
+                                                     bool timer_attempt)
+{
+  static constexpr int FOCUS_RESTORATION_INTERVAL_MS = 50;
+  if (!m_quick_menu_focus_restoration_phase.IsCurrent(generation))
   {
+    Common::PointerE2ETelemetry::Log(
+        "quick_menu_focus_stale_callback",
+        fmt::format("generation={} timer={}", generation, timer_attempt));
     return;
   }
 
-  setFocus(Qt::OtherFocusReason);
+  if (!m_pending_quick_menu_action || m_quick_menu_session.IsOpen() ||
+      (m_quick_menu != nullptr && m_quick_menu->isVisible()))
+  {
+    m_quick_menu_focus_restoration_phase.Cancel();
+    return;
+  }
+
+  if (timer_attempt)
+    RequestNativeRenderActivation();
+
+  Core::UpdateInputGate(!Config::Get(Config::MAIN_INPUT_BACKGROUND_INPUT));
+  const QuickMenuFocusReadiness readiness = GetQuickMenuFocusReadiness(this, m_quick_menu);
+  const bool forced_timeout =
+      IsQuickMenuRecoveryAction(*m_pending_quick_menu_action) &&
+      IsForcedE2EQuickMenuTransaction(
+          "DOLPHIN_POINTER_E2E_FORCE_QUICK_MENU_FOCUS_TIMEOUT_AT",
+          m_quick_menu_recovery_transaction_count);
+  const bool ready = readiness.IsReady() && !forced_timeout;
+  const QuickMenuBoundedPhaseResult result =
+      timer_attempt ? m_quick_menu_focus_restoration_phase.Advance(generation, ready) :
+                      m_quick_menu_focus_restoration_phase.Observe(generation, ready);
+
+  Common::PointerE2ETelemetry::Log(
+      "quick_menu_focus_readiness",
+      fmt::format(
+          "generation={} attempt={} timer={} modal_clear={} menu_hidden={} menu_native_gone={} "
+          "active_window_owner={} render_active={} focus_window_owner={} render_focus={} "
+          "host_focus={} input_gate={} forced_timeout={} ready={}",
+          generation, m_quick_menu_focus_restoration_phase.GetAttempts(), timer_attempt,
+          readiness.modal_clear, readiness.menu_hidden, readiness.menu_native_gone,
+          readiness.active_window_owner, readiness.render_active, readiness.focus_window_owner,
+          readiness.render_focused, readiness.host_focused, readiness.input_gate_open,
+          forced_timeout, ready));
+
+  if (result == QuickMenuBoundedPhaseResult::Stale)
+    return;
+  if (result == QuickMenuBoundedPhaseResult::Waiting)
+  {
+    if (timer_attempt)
+      QueueQuickMenuFocusRestoration(generation, FOCUS_RESTORATION_INTERVAL_MS);
+    return;
+  }
+  if (result == QuickMenuBoundedPhaseResult::TimedOut)
+  {
+    const std::string reason = fmt::format(
+        "focus/readiness timeout: modal_clear={} menu_hidden={} menu_native_gone={} "
+        "active_window_owner={} render_active={} focus_window_owner={} render_focus={} "
+        "host_focus={} input_gate={} forced_timeout={}",
+        readiness.modal_clear, readiness.menu_hidden, readiness.menu_native_gone,
+        readiness.active_window_owner, readiness.render_active, readiness.focus_window_owner,
+        readiness.render_focused, readiness.host_focused, readiness.input_gate_open,
+        forced_timeout);
+    if (IsQuickMenuRecoveryAction(*m_pending_quick_menu_action))
+    {
+      FailQuickMenuRecoveryTransaction(reason);
+      return;
+    }
+
+    ERROR_LOG_FMT(COMMON, "Quick Menu native focus restoration failed: {}", reason);
+    const QuickMenuAction action = *m_pending_quick_menu_action;
+    const bool resume_emulation = m_resume_emulation_after_quick_menu_focus;
+    m_pending_quick_menu_action.reset();
+    m_resume_emulation_after_quick_menu_focus = false;
+    if (action == QuickMenuAction::OpenControllerSettings)
+    {
+      emit QuickMenuControllerSettingsRequested();
+      if (resume_emulation && Core::GetState(Core::System::GetInstance()) == Core::State::Paused)
+        Core::SetState(Core::System::GetInstance(), Core::State::Running);
+    }
+    else if (action == QuickMenuAction::StopEmulation)
+    {
+      emit QuickMenuStopRequested();
+    }
+    return;
+  }
+
   const QuickMenuAction action = *m_pending_quick_menu_action;
-  m_pending_quick_menu_action.reset();
-  const bool resume_emulation = m_resume_emulation_after_quick_menu_focus;
-  m_resume_emulation_after_quick_menu_focus = false;
 
   LogQuickMenuFocusState("quick_menu_focus_restored", this, m_quick_menu);
   INFO_LOG_FMT(COMMON,
@@ -407,31 +570,312 @@ void RenderWidget::CompleteQuickMenuCloseAfterFocus()
                "host_renderer_focus={}; applying deferred action",
                hasFocus(), Host_RendererHasFocus());
 
-  if (resume_emulation && Core::GetState(Core::System::GetInstance()) == Core::State::Paused)
-    Core::SetState(Core::System::GetInstance(), Core::State::Running);
-
   switch (action)
   {
   case QuickMenuAction::Resume:
-    break;
   case QuickMenuAction::RestoreWiiPointer:
-    INFO_LOG_FMT(WIIMOTE, "Wii pointer recovery requested from Dolphin Quick Menu");
-    Host::GetInstance()->RequestWiiPointerRecovery(
-        Wiimote::PointerRecoveryEntryPoint::QuickMenu);
-    break;
   case QuickMenuAction::ReconnectMouseInput:
-    INFO_LOG_FMT(WIIMOTE, "Mouse input reconnect requested from Dolphin Quick Menu");
-    RequestMouseInputReconnect();
+  case QuickMenuAction::RebootEmulation:
+    BeginQuickMenuRecoveryTransaction();
     break;
   case QuickMenuAction::OpenControllerSettings:
+    m_pending_quick_menu_action.reset();
+    m_resume_emulation_after_quick_menu_focus = false;
     emit QuickMenuControllerSettingsRequested();
     break;
   case QuickMenuAction::StopEmulation:
+    m_pending_quick_menu_action.reset();
+    m_resume_emulation_after_quick_menu_focus = false;
     emit QuickMenuStopRequested();
     break;
   }
 
+  if (action == QuickMenuAction::OpenControllerSettings &&
+      m_quick_menu_session.ShouldResumeEmulationOnClose() &&
+      Core::GetState(Core::System::GetInstance()) == Core::State::Paused)
+  {
+    Core::SetState(Core::System::GetInstance(), Core::State::Running);
+  }
+}
+
+void RenderWidget::CompleteQuickMenuCloseAfterFocus()
+{
+  const std::optional<std::uint64_t> generation =
+      m_quick_menu_focus_restoration_phase.GetCurrentGeneration();
+  if (generation)
+    EvaluateQuickMenuFocusRestoration(*generation, false);
+}
+
+void RenderWidget::BeginQuickMenuRecoveryTransaction()
+{
+  if (!m_pending_quick_menu_action || m_quick_menu_recovery_operation_started)
+    return;
+
+  const QuickMenuAction action = *m_pending_quick_menu_action;
+  const bool eligible = Wiimote::HasMousePointerRecoveryEligibleController();
+  if ((action == QuickMenuAction::Resume || action == QuickMenuAction::RebootEmulation) &&
+      !eligible)
+  {
+    INFO_LOG_FMT(
+        WIIMOTE,
+        "Quick Menu {} found no active mouse-based Wii Point mapping; continuing without an "
+        "input reconnect",
+        action == QuickMenuAction::Resume ? "Resume" : "Reboot Emulation");
+    CompleteQuickMenuRecoveryTransaction();
+    return;
+  }
+
+  m_quick_menu_recovery_operation_started = true;
+  m_quick_menu_recovery_validation_successes = 0;
+  unsigned int recovery_count = 0;
+  switch (action)
+  {
+  case QuickMenuAction::Resume:
+    INFO_LOG_FMT(WIIMOTE, "Quick Menu Resume requested ordinary Wii pointer recovery");
+    recovery_count =
+        Wiimote::RestoreMousePointers(Wiimote::PointerRecoveryTrigger::FocusRegained);
+    break;
+  case QuickMenuAction::RestoreWiiPointer:
+    INFO_LOG_FMT(WIIMOTE, "Explicit Wii pointer recovery requested from Dolphin Quick Menu");
+    recovery_count = Wiimote::RestoreMousePointers(Wiimote::PointerRecoveryTrigger::Manual);
+    break;
+  case QuickMenuAction::ReconnectMouseInput:
+    INFO_LOG_FMT(WIIMOTE, "Mouse input reconnect requested from Dolphin Quick Menu");
+    recovery_count = Wiimote::ReconnectMouseInput();
+    break;
+  case QuickMenuAction::RebootEmulation:
+    INFO_LOG_FMT(WIIMOTE,
+                 "Emulation reboot requested from Dolphin Quick Menu; rebuilding mouse input "
+                 "before tapping the emulated reset button");
+    recovery_count = Wiimote::ReconnectMouseInput();
+    break;
+  case QuickMenuAction::OpenControllerSettings:
+  case QuickMenuAction::StopEmulation:
+    break;
+  }
+
+  Common::PointerE2ETelemetry::Log(
+      "quick_menu_recovery_started",
+      fmt::format("action={} eligible={} queued={} core_state={} input_gate={}",
+                  static_cast<int>(action), eligible, recovery_count,
+                  static_cast<int>(Core::GetState(Core::System::GetInstance())),
+                  ControlReference::GetInputGate()));
+  if (recovery_count == 0)
+  {
+    FailQuickMenuRecoveryTransaction(
+        eligible ? "pointer recovery operation queued no controllers" :
+                   "no eligible mouse-based Wii Point mapping");
+    return;
+  }
+
+  const std::uint64_t generation = m_quick_menu_recovery_validation_phase.Start();
+  QueueQuickMenuRecoveryValidation(generation);
+}
+
+void RenderWidget::QueueQuickMenuRecoveryValidation(std::uint64_t generation)
+{
+  static constexpr int RECOVERY_VALIDATION_INTERVAL_MS = 50;
+  if (!m_quick_menu_recovery_operation_started ||
+      !m_quick_menu_recovery_validation_phase.IsCurrent(generation) ||
+      m_quick_menu_recovery_timer_generation == generation)
+    return;
+
+  m_quick_menu_recovery_timer_generation = generation;
+  QTimer::singleShot(RECOVERY_VALIDATION_INTERVAL_MS, this, [this, generation] {
+    if (m_quick_menu_recovery_timer_generation == generation)
+      m_quick_menu_recovery_timer_generation.reset();
+    ValidateQuickMenuRecovery(generation);
+  });
+}
+
+void RenderWidget::ValidateQuickMenuRecovery(std::uint64_t generation)
+{
+  static constexpr unsigned int REQUIRED_CONSECUTIVE_VALIDATIONS = 3;
+  if (!m_quick_menu_recovery_validation_phase.IsCurrent(generation))
+  {
+    Common::PointerE2ETelemetry::Log(
+        "quick_menu_recovery_stale_callback", fmt::format("generation={}", generation));
+    return;
+  }
+
+  if (!m_pending_quick_menu_action || !m_quick_menu_recovery_operation_started ||
+      m_quick_menu_session.IsOpen())
+  {
+    m_quick_menu_recovery_validation_phase.Cancel();
+    return;
+  }
+
+  Core::UpdateInputGate(!Config::Get(Config::MAIN_INPUT_BACKGROUND_INPUT));
+  const QuickMenuFocusReadiness readiness = GetQuickMenuFocusReadiness(this, m_quick_menu);
+
+  if (!readiness.IsReady())
+  {
+    m_quick_menu_recovery_validation_successes = 0;
+    const QuickMenuBoundedPhaseResult phase_result =
+        m_quick_menu_recovery_validation_phase.Advance(generation, false);
+    Common::PointerE2ETelemetry::Log(
+        "quick_menu_recovery_readiness_wait",
+        fmt::format(
+            "generation={} attempt={} modal_clear={} menu_hidden={} menu_native_gone={} "
+            "active_window_owner={} render_active={} focus_window_owner={} render_focus={} "
+            "host_focus={} input_gate={}",
+            generation, m_quick_menu_recovery_validation_phase.GetAttempts(),
+            readiness.modal_clear, readiness.menu_hidden, readiness.menu_native_gone,
+            readiness.active_window_owner, readiness.render_active,
+            readiness.focus_window_owner, readiness.render_focused, readiness.host_focused,
+            readiness.input_gate_open));
+    if (phase_result == QuickMenuBoundedPhaseResult::TimedOut)
+    {
+      FailQuickMenuRecoveryTransaction(
+          fmt::format(
+              "readiness timeout: modal_clear={} menu_hidden={} menu_native_gone={} "
+              "active_window_owner={} render_active={} focus_window_owner={} render_focus={} "
+              "host_focus={} input_gate={}",
+              readiness.modal_clear, readiness.menu_hidden, readiness.menu_native_gone,
+              readiness.active_window_owner, readiness.render_active,
+              readiness.focus_window_owner, readiness.render_focused, readiness.host_focused,
+              readiness.input_gate_open));
+      return;
+    }
+    RequestNativeRenderActivation();
+    QueueQuickMenuRecoveryValidation(generation);
+    return;
+  }
+
+  const Wiimote::PointerRecoveryValidationResult result =
+      Wiimote::PollMousePointerRecoveryResult();
+  const bool force_failure =
+      !m_quick_menu_forced_failure_consumed &&
+      IsForcedE2EQuickMenuTransaction(
+          "DOLPHIN_POINTER_E2E_FORCE_QUICK_MENU_RECOVERY_FAILURE_AT",
+          m_quick_menu_recovery_transaction_count);
+  if (force_failure)
+  {
+    m_quick_menu_forced_failure_consumed = true;
+    FailQuickMenuRecoveryTransaction("forced E2E pointer-result failure");
+    return;
+  }
+
+  const unsigned int validation_attempt =
+      m_quick_menu_recovery_validation_phase.GetAttempts() + 1;
+  if (result.IsUsable())
+    ++m_quick_menu_recovery_validation_successes;
+  else
+    m_quick_menu_recovery_validation_successes = 0;
+  const bool validation_complete =
+      m_quick_menu_recovery_validation_successes >= REQUIRED_CONSECUTIVE_VALIDATIONS;
+  const QuickMenuBoundedPhaseResult phase_result =
+      m_quick_menu_recovery_validation_phase.Advance(generation, validation_complete);
+
+  Common::PointerE2ETelemetry::Log(
+      "quick_menu_recovery_validation",
+      fmt::format(
+          "generation={} attempt={} consecutive={} input_gate={} eligible={} finite={} visible={} "
+          "ir_valid={} usable={}",
+          generation, validation_attempt, m_quick_menu_recovery_validation_successes,
+          result.input_gate_open,
+          result.eligible_controllers, result.finite_point_controllers,
+          result.visible_point_controllers, result.valid_ir_controllers,
+          result.usable_controllers));
+  if (phase_result == QuickMenuBoundedPhaseResult::Succeeded)
+  {
+    CompleteQuickMenuRecoveryTransaction();
+    return;
+  }
+
+  if (phase_result == QuickMenuBoundedPhaseResult::TimedOut)
+  {
+    FailQuickMenuRecoveryTransaction(
+        fmt::format(
+            "pointer-result timeout: gate={} eligible={} finite={} visible={} ir_valid={} "
+            "usable={}",
+            result.input_gate_open, result.eligible_controllers,
+            result.finite_point_controllers, result.visible_point_controllers,
+            result.valid_ir_controllers, result.usable_controllers));
+    return;
+  }
+  QueueQuickMenuRecoveryValidation(generation);
+}
+
+void RenderWidget::CompleteQuickMenuRecoveryTransaction()
+{
+  const QuickMenuAction action =
+      m_pending_quick_menu_action.value_or(QuickMenuAction::Resume);
+  const bool resume_emulation = m_resume_emulation_after_quick_menu_focus;
+  m_pending_quick_menu_action.reset();
+  m_resume_emulation_after_quick_menu_focus = false;
+  m_quick_menu_recovery_operation_started = false;
+  m_quick_menu_recovery_validation_successes = 0;
+  m_quick_menu_focus_restoration_phase.Cancel();
+  m_quick_menu_recovery_validation_phase.Cancel();
+  m_quick_menu_focus_timer_generation.reset();
+  m_quick_menu_recovery_timer_generation.reset();
+
+  Common::PointerE2ETelemetry::Log(
+      "quick_menu_recovery_complete",
+      fmt::format("action={} resume={} core_state_before={}", static_cast<int>(action),
+                  resume_emulation,
+                  static_cast<int>(Core::GetState(Core::System::GetInstance()))));
+  if (action == QuickMenuAction::RebootEmulation)
+  {
+    Common::PointerE2ETelemetry::Log("quick_menu_reboot_ready",
+                                     "input_reconnected=true pointer_validated=true");
+    emit QuickMenuRebootRequested();
+  }
+  if (resume_emulation && Core::GetState(Core::System::GetInstance()) == Core::State::Paused)
+    Core::SetState(Core::System::GetInstance(), Core::State::Running);
   LogQuickMenuFocusState("quick_menu_after_pause_restore", this, m_quick_menu);
+}
+
+void RenderWidget::FailQuickMenuRecoveryTransaction(std::string_view reason)
+{
+  static constexpr auto FAILURE_MESSAGE =
+      QT_TR_NOOP("Wii pointer recovery failed. Try Reconnect Mouse Input or open Controller "
+                 "Settings.");
+  ERROR_LOG_FMT(WIIMOTE, "Quick Menu Wii pointer recovery failed: {}", reason);
+  Common::PointerE2ETelemetry::Log(
+      "quick_menu_recovery_failed",
+      fmt::format("reason='{}' core_state={}", reason,
+                  static_cast<int>(Core::GetState(Core::System::GetInstance()))));
+
+  const bool resume_emulation = m_resume_emulation_after_quick_menu_focus;
+  m_pending_quick_menu_action.reset();
+  m_resume_emulation_after_quick_menu_focus = false;
+  m_quick_menu_recovery_operation_started = false;
+  m_quick_menu_recovery_validation_successes = 0;
+  m_quick_menu_focus_restoration_phase.Cancel();
+  m_quick_menu_recovery_validation_phase.Cancel();
+  m_quick_menu_focus_timer_generation.reset();
+  m_quick_menu_recovery_timer_generation.reset();
+  SetCursorLocked(false);
+  setCursor(Qt::ArrowCursor);
+
+  if (Core::GetState(Core::System::GetInstance()) == Core::State::Running)
+    Core::SetState(Core::System::GetInstance(), Core::State::Paused);
+
+  if (!m_quick_menu_session.Open(resume_emulation))
+  {
+    ERROR_LOG_FMT(COMMON, "Quick Menu recovery failure could not reopen the host menu session");
+    return;
+  }
+
+  EnsureQuickMenu();
+  m_quick_menu->SetStatusMessage(tr(FAILURE_MESSAGE));
+  if (!m_quick_menu->Open())
+  {
+    ERROR_LOG_FMT(COMMON, "Quick Menu recovery failure could not restore the native Tool window");
+    m_quick_menu_session.Close(QuickMenuAction::Resume);
+    return;
+  }
+  Host::GetInstance()->SetQuickMenuOpen(true);
+  Core::UpdateInputGate(!Config::Get(Config::MAIN_INPUT_BACKGROUND_INPUT));
+  Common::PointerE2ETelemetry::Log(
+      "quick_menu_recovery_failure_reopened",
+      fmt::format(
+          "visible={} hidden={} core_state={} cursor_arrow={} status='{}'",
+          m_quick_menu->isVisible(), m_quick_menu->isHidden(),
+          static_cast<int>(Core::GetState(Core::System::GetInstance())),
+          cursor().shape() == Qt::ArrowCursor, FAILURE_MESSAGE));
 }
 
 void RenderWidget::QueueWiiPointerRecovery()
@@ -525,6 +969,7 @@ void RenderWidget::TryWiiPointerRecovery()
       .no_active_modal = QApplication::activeModalWidget() == nullptr,
       .render_widget_focused = native_render_has_focus,
       .host_renderer_focused = Host_RendererHasFocus(),
+      .input_gate_open = ControlReference::GetInputGate(),
       .input_backend_valid = input_backend_valid,
   };
   Common::PointerE2ETelemetry::Log(
@@ -840,6 +1285,20 @@ void RenderWidget::SetWaitingForMessageBox(bool waiting_for_message_box)
 
 bool RenderWidget::event(QEvent* event)
 {
+  if (Common::PointerE2ETelemetry::IsEnabled() &&
+      (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress ||
+       event->type() == QEvent::KeyRelease))
+  {
+    const auto* const key_event = static_cast<const QKeyEvent*>(event);
+    if (key_event->key() == Qt::Key_Space)
+    {
+      Common::PointerE2ETelemetry::Log(
+          "quick_menu_shortcut_key_event",
+          fmt::format("type={} key={} modifiers={} accepted={}",
+                      static_cast<int>(event->type()), key_event->key(),
+                      static_cast<int>(key_event->modifiers()), event->isAccepted()));
+    }
+  }
   PassEventToPresenter(event);
 
   switch (event->type())
@@ -848,6 +1307,7 @@ bool RenderWidget::event(QEvent* event)
     LogQuickMenuFocusState("render_focus_in", this, m_quick_menu);
     if (m_wii_pointer_recovery_pending)
       QueueWiiPointerRecovery();
+    CompleteQuickMenuCloseAfterFocus();
     break;
   case QEvent::FocusOut:
     LogQuickMenuFocusState("render_focus_out", this, m_quick_menu);
@@ -939,7 +1399,8 @@ bool RenderWidget::event(QEvent* event)
                  QApplication::activeModalWidget() != nullptr, m_waiting_for_message_box,
                  isActiveWindow(), hasFocus(), Host_RendererHasFocus());
     Wiimote::HandleRendererFocusChanged(true);
-    RequestWiiPointerRecovery(Wiimote::PointerRecoveryTrigger::FocusRegained);
+    if (!m_pending_quick_menu_action)
+      RequestWiiPointerRecovery(Wiimote::PointerRecoveryTrigger::FocusRegained);
     CompleteQuickMenuCloseAfterFocus();
     LogQuickMenuFocusState("render_window_activate_exit", this, m_quick_menu);
     break;

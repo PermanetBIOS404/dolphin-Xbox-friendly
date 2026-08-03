@@ -230,9 +230,6 @@ void HotkeyScheduler::Run()
       if (IsHotkey(HK_RESET))
         emit ResetHotkey();
 
-      if (IsHotkey(HK_OPEN_QUICK_MENU))
-        emit OpenQuickMenu();
-
       // Frame advance
       HandleFrameStepHotkeys();
 

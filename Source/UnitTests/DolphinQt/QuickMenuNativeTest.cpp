@@ -250,6 +250,7 @@ private slots:
     const QImage closed_before = GrabScreen();
 
     QSignalSpy opened_spy(&m_host, &QuickMenuNativeHost::QuickMenuOpened);
+    QVERIFY(m_host.GetQuickMenuAction()->shortcut().isEmpty());
     m_host.GetQuickMenuAction()->trigger();
 
     QTRY_COMPARE(opened_spy.count(), 1);
@@ -343,6 +344,18 @@ private slots:
     QTest::mouseClick(restore_button, Qt::LeftButton);
     QTRY_VERIFY(!quick_menu->isVisible());
     QCOMPARE(m_host.GetLastAction(), QuickMenuAction::RestoreWiiPointer);
+    QVERIFY(!m_host.IsInputBlocked());
+
+    // The host-only hard fallback is present even when the emulated Wii pointer cannot be used.
+    m_host.GetQuickMenuAction()->trigger();
+    QTRY_VERIFY(quick_menu->isVisible());
+    QCOMPARE(m_host.GetOpenRequestCount(), 3);
+    auto* const reboot_button =
+        quick_menu->findChild<QPushButton*>(QStringLiteral("quickMenuRebootEmulationButton"));
+    QVERIFY(reboot_button != nullptr);
+    QTest::mouseClick(reboot_button, Qt::LeftButton);
+    QTRY_VERIFY(!quick_menu->isVisible());
+    QCOMPARE(m_host.GetLastAction(), QuickMenuAction::RebootEmulation);
     QVERIFY(!m_host.IsInputBlocked());
 
     qInfo() << "closed_screenshot=" << closed_path;

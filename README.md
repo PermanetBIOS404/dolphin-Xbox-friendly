@@ -12,6 +12,30 @@ If you're using this fork to play Wii games with an Xbox controller on **Windows
 
 - `instructionsreadme.md`
 
+## Xbox-Friendly Wii Input and Quick Menu
+
+This fork supports Xbox-controller and mouse-based Wii input. The host-side Dolphin Quick Menu
+provides recovery controls that remain usable with the normal Linux cursor when the emulated Wii
+hand is missing. In this release, open it from **Emulation → Dolphin Quick Menu**.
+
+The Quick Menu provides:
+
+- Resume / Close Quick Menu
+- Reconnect Mouse Input / Controllers
+- Restore Wii Pointer (Lightweight)
+- Reboot Emulation + Reconnect Input
+- Controller Settings
+- Stop Emulation
+
+Ctrl+Shift+Space was tested as an application-wide shortcut, but it is deferred because shortcut
+delivery was not reliable on real Cinnamon/X11 desktops. Keyboard-shortcut support may return in a
+future update after broader Linux desktop validation; this does not affect the recovery menu itself.
+
+### Known limitations
+
+- The Quick Menu currently must be opened from Dolphin's **Emulation** menu. A dependable
+  application-wide keyboard shortcut remains future work.
+
 Please read the [FAQ](https://dolphin-emu.org/docs/faq/) before using Dolphin.
 
 ## System Requirements

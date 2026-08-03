@@ -456,7 +456,17 @@ void Wiimote::ResetPointerState()
   const auto lock = GetStateLock();
   m_ir->ResetRuntimeState();
   m_point_state = {};
+  m_pointer_state_finite.store(false);
+  m_pointer_state_visible.store(false);
   m_pointer_state_usable.store(false);
+}
+
+Wiimote::PointerStateStatus Wiimote::GetPointerStateStatus() const
+{
+  return {
+      .finite = m_pointer_state_finite.load(),
+      .visible = m_pointer_state_visible.load(),
+  };
 }
 
 bool Wiimote::IsPointerStateUsable() const
@@ -588,9 +598,13 @@ void Wiimote::BuildDesiredWiimoteState(DesiredWiimoteState* target_state,
 
   // Update our motion simulations.
   StepDynamics();
-  m_pointer_state_usable.store(
-      m_point_state.position.y != -1000.f && std::isfinite(m_point_state.position.x) &&
-      std::isfinite(m_point_state.position.y) && std::isfinite(m_point_state.position.z));
+  const bool point_finite =
+      std::isfinite(m_point_state.position.x) && std::isfinite(m_point_state.position.y);
+  const bool point_visible = m_point_state.position.y != -1000.f;
+  m_pointer_state_finite.store(point_finite);
+  m_pointer_state_visible.store(point_visible);
+  m_pointer_state_usable.store(point_finite && point_visible &&
+                               std::isfinite(m_point_state.position.z));
 
   if (pointer_recovery == ::Wiimote::PointerRecoveryRuntimeResult::Executed)
   {
@@ -635,15 +649,17 @@ void Wiimote::BuildDesiredWiimoteState(DesiredWiimoteState* target_state,
     static std::array<std::atomic<int>, MAX_WIIMOTES> last_ir_valid = {-1, -1, -1, -1};
     const unsigned int index = GetWiimoteDeviceIndex();
     const unsigned int sample = sample_counts[index].fetch_add(1);
-    const bool point_visible =
+    const bool telemetry_point_visible =
         m_point_state.position.y != -1000.f && std::isfinite(m_point_state.position.x) &&
         std::isfinite(m_point_state.position.y) && std::isfinite(m_point_state.position.z);
     const bool ir_valid = std::ranges::any_of(target_state->camera_points, [](const auto& point) {
       return point.position.x != 0xffff && point.position.y != 0xffff;
     });
-    const int previous_point_visible = last_point_visible[index].exchange(point_visible);
+    const int previous_point_visible =
+        last_point_visible[index].exchange(telemetry_point_visible);
     const int previous_ir_valid = last_ir_valid[index].exchange(ir_valid);
-    if (sample < 12 || previous_point_visible != static_cast<int>(point_visible) ||
+    if (sample < 12 ||
+        previous_point_visible != static_cast<int>(telemetry_point_visible) ||
         previous_ir_valid != static_cast<int>(ir_valid) ||
         pointer_recovery == ::Wiimote::PointerRecoveryRuntimeResult::Executed)
     {
@@ -655,7 +671,7 @@ void Wiimote::BuildDesiredWiimoteState(DesiredWiimoteState* target_state,
               "point_z={} ir_valid={} ir0_x={} ir0_y={} ir0_size={}",
               index + 1, sample,
               pointer_recovery == ::Wiimote::PointerRecoveryRuntimeResult::Executed,
-              !point_visible, m_point_state.position.x, m_point_state.position.y,
+              !telemetry_point_visible, m_point_state.position.x, m_point_state.position.y,
               m_point_state.position.z, ir_valid, first_ir.position.x, first_ir.position.y,
               first_ir.size));
     }

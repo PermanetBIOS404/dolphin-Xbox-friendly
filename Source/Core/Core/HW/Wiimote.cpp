@@ -3,6 +3,7 @@
 
 #include "Core/HW/Wiimote.h"
 
+#include <algorithm>
 #include <optional>
 
 #include <fmt/format.h>
@@ -16,6 +17,8 @@
 #include "Core/Config/WiimoteSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
+#include "Core/HW/WII_IPC.h"
+#include "Core/HW/WiimoteEmu/DesiredWiimoteState.h"
 #include "Core/HW/WiimoteEmu/WiimoteEmu.h"
 #include "Core/HW/WiimoteReal/WiimoteReal.h"
 #include "Core/IOS/IOS.h"
@@ -25,6 +28,7 @@
 #include "Core/System.h"
 #include "Core/WiiUtils.h"
 
+#include "InputCommon/ControlReference/ControlReference.h"
 #include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
 #include "InputCommon/ControllerEmu/ControlGroup/Cursor.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
@@ -154,7 +158,8 @@ static const char* GetPointerRecoveryTriggerName(PointerRecoveryTrigger trigger)
 bool IsPointerRecoveryReady(const PointerRecoveryReadiness& readiness)
 {
   return readiness.no_active_modal && readiness.render_widget_focused &&
-         readiness.host_renderer_focused && readiness.input_backend_valid;
+         readiness.host_renderer_focused && readiness.input_gate_open &&
+         readiness.input_backend_valid;
 }
 
 PointerRecoveryTrigger GetPointerRecoveryTriggerForEntryPoint(PointerRecoveryEntryPoint entry_point)
@@ -499,6 +504,58 @@ unsigned int ReconnectMouseInput()
                "controller(s) queued for runtime reset",
                recovery_count);
   return recovery_count;
+}
+
+PointerRecoveryValidationResult PollMousePointerRecoveryResult()
+{
+  PointerRecoveryValidationResult result{
+      .input_gate_open = ControlReference::GetInputGate(),
+  };
+  const Core::State core_state = Core::GetState(Core::System::GetInstance());
+  if (!result.input_gate_open || core_state == Core::State::Uninitialized ||
+      core_state == Core::State::Stopping)
+  {
+    return result;
+  }
+
+  g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::Bluetooth);
+  g_controller_interface.UpdateInput();
+
+  auto& system = Core::System::GetInstance();
+  const auto sensor_bar_state =
+      system.GetWiiIPC().GetGPIOOutFlags()[IOS::GPIO::SENSOR_BAR] ?
+          WiimoteCommon::HIDWiimote::SensorBarState::Enabled :
+          WiimoteCommon::HIDWiimote::SensorBarState::Disabled;
+
+  for (unsigned int index = 0; index < MAX_WIIMOTES; ++index)
+  {
+    if (static_cast<int>(index) >= s_config.GetControllerCount() ||
+        GetSource(index) != WiimoteSource::Emulated)
+    {
+      continue;
+    }
+
+    auto* const wiimote =
+        static_cast<WiimoteEmu::Wiimote*>(s_config.GetController(static_cast<int>(index)));
+    if (!IsMousePointerRecoveryEligible(wiimote, GetSource(index), g_controller_interface))
+      continue;
+
+    ++result.eligible_controllers;
+    WiimoteEmu::DesiredWiimoteState desired_state;
+    wiimote->PrepareInput(&desired_state, sensor_bar_state);
+    const auto point = wiimote->GetPointerStateStatus();
+    const bool ir_valid =
+        std::ranges::any_of(desired_state.camera_points, [](const auto& camera_point) {
+          return camera_point.position.x != 0xffff && camera_point.position.y != 0xffff;
+        });
+
+    result.finite_point_controllers += point.finite;
+    result.visible_point_controllers += point.visible;
+    result.valid_ir_controllers += ir_valid;
+    result.usable_controllers += point.finite && point.visible && ir_valid;
+  }
+
+  return result;
 }
 
 bool IsMousePointerRecoveryEligible(const ControllerEmu::EmulatedController* controller,

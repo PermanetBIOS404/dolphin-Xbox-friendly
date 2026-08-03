@@ -138,7 +138,20 @@ struct PointerRecoveryReadiness
   bool no_active_modal = false;
   bool render_widget_focused = false;
   bool host_renderer_focused = false;
+  bool input_gate_open = false;
   bool input_backend_valid = false;
+};
+
+struct PointerRecoveryValidationResult
+{
+  bool input_gate_open = false;
+  unsigned int eligible_controllers = 0;
+  unsigned int finite_point_controllers = 0;
+  unsigned int visible_point_controllers = 0;
+  unsigned int valid_ir_controllers = 0;
+  unsigned int usable_controllers = 0;
+
+  bool IsUsable() const { return eligible_controllers != 0 && usable_controllers != 0; }
 };
 
 bool IsPointerRecoveryReady(const PointerRecoveryReadiness& readiness);
@@ -166,6 +179,7 @@ void Pause();
 PointerRecoveryResult RestoreMousePointer(unsigned int index, PointerRecoveryTrigger trigger);
 unsigned int RestoreMousePointers(PointerRecoveryTrigger trigger);
 unsigned int ReconnectMouseInput();
+PointerRecoveryValidationResult PollMousePointerRecoveryResult();
 void HandleRendererFocusChanged(bool focused);
 bool HasMousePointerRecoveryEligibleController();
 bool HasUsableMousePointerController();

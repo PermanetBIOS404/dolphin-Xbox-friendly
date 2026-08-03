@@ -377,13 +377,17 @@ MainWindow::MainWindow(Core::System& system, std::unique_ptr<BootParameters> boo
                 return;
 
               *triggered = true;
-              QTimer::singleShot(5000, this, [this] {
+              bool delay_valid = false;
+              const int configured_delay = qEnvironmentVariableIntValue(
+                  "DOLPHIN_POINTER_E2E_AUTO_QUICK_MENU_DELAY_MS", &delay_valid);
+              const int delay_ms = delay_valid && configured_delay >= 0 ? configured_delay : 5000;
+              QTimer::singleShot(delay_ms, this, [this, delay_ms] {
                 QAction* const action =
                     m_menu_bar->findChild<QAction*>(QStringLiteral("actionDolphinQuickMenu"));
                 Common::PointerE2ETelemetry::Log(
                     "quick_menu_action_automation",
-                    fmt::format("found={} enabled={}", action != nullptr,
-                                action != nullptr && action->isEnabled()));
+                    fmt::format("found={} enabled={} delay_ms={}", action != nullptr,
+                                action != nullptr && action->isEnabled(), delay_ms));
                 if (action != nullptr && action->isEnabled())
                   action->trigger();
               });
@@ -690,7 +694,6 @@ void MainWindow::ConnectHotkeys()
           &MainWindow::RefreshGameList);
   connect(m_hotkey_scheduler, &HotkeyScheduler::StopHotkey, this, &MainWindow::RequestStop);
   connect(m_hotkey_scheduler, &HotkeyScheduler::ResetHotkey, this, &MainWindow::Reset);
-  connect(m_hotkey_scheduler, &HotkeyScheduler::OpenQuickMenu, this, &MainWindow::OpenQuickMenu);
   connect(m_hotkey_scheduler, &HotkeyScheduler::RestoreWiiPointer, this, [] {
     Host::GetInstance()->RequestWiiPointerRecovery(Wiimote::PointerRecoveryEntryPoint::Hotkey);
   });
@@ -802,6 +805,11 @@ void MainWindow::ConnectRenderWidget()
   connect(m_render_widget, &RenderWidget::QuickMenuControllerSettingsRequested, this, [this] {
     m_quick_menu_controller_settings_pending = true;
     ShowControllersWindow();
+  });
+  connect(m_render_widget, &RenderWidget::QuickMenuRebootRequested, this, [this] {
+    Common::PointerE2ETelemetry::Log("quick_menu_reboot_requested",
+                                     "operation=emulated_reset_button");
+    Reset();
   });
   connect(m_render_widget, &RenderWidget::QuickMenuStopRequested, this,
           &MainWindow::RequestStop);
@@ -1126,6 +1134,11 @@ bool MainWindow::RequestStop()
                  "host_renderer_focus={}",
                  m_render_widget->isActiveWindow(), m_render_widget->hasFocus(),
                  Host_RendererHasFocus());
+    Common::PointerE2ETelemetry::Log(
+        "quit_confirmation_opened",
+        fmt::format("render_active={} render_focus={} host_focus={} core_state={}",
+                    m_render_widget->isActiveWindow(), m_render_widget->hasFocus(),
+                    Host_RendererHasFocus(), static_cast<int>(Core::GetState(m_system))));
     const auto confirm = ModalMessageBox::question(confirm_parent, tr("Confirm"), message,
                                                    QMessageBox::Yes | QMessageBox::No,
                                                    QMessageBox::NoButton, Qt::ApplicationModal);
@@ -1135,6 +1148,12 @@ bool MainWindow::RequestStop()
                  confirm == QMessageBox::Yes ? "Quit" : "Don't Quit",
                  QApplication::activeModalWidget() != nullptr, m_render_widget->isActiveWindow(),
                  m_render_widget->hasFocus(), Host_RendererHasFocus());
+    Common::PointerE2ETelemetry::Log(
+        "quit_confirmation_closed",
+        fmt::format("response={} render_active={} render_focus={} host_focus={} core_state={}",
+                    confirm == QMessageBox::Yes ? "Yes" : "No",
+                    m_render_widget->isActiveWindow(), m_render_widget->hasFocus(),
+                    Host_RendererHasFocus(), static_cast<int>(Core::GetState(m_system))));
 
     // If a user confirmed stopping the emulation, we do not capture the cursor again,
     // even if the render widget will stay alive for a while.
@@ -1443,6 +1462,11 @@ void MainWindow::HideRenderWidget(bool reinit, bool is_exit)
     connect(m_render_widget, &RenderWidget::QuickMenuControllerSettingsRequested, this, [this] {
       m_quick_menu_controller_settings_pending = true;
       ShowControllersWindow();
+    });
+    connect(m_render_widget, &RenderWidget::QuickMenuRebootRequested, this, [this] {
+      Common::PointerE2ETelemetry::Log("quick_menu_reboot_requested",
+                                       "operation=emulated_reset_button");
+      Reset();
     });
     connect(m_render_widget, &RenderWidget::QuickMenuStopRequested, this,
             &MainWindow::RequestStop);

@@ -35,7 +35,6 @@ constexpr std::array<const char*, NUM_HOTKEYS> s_hotkey_labels{{
     _trans("Center Mouse"),
     _trans("Activate NetPlay Chat"),
     _trans("Control NetPlay Golf Mode"),
-    _trans("Open Dolphin Quick Menu"),
 #ifdef USE_RETRO_ACHIEVEMENTS
     _trans("Open Achievements"),
 #endif  // USE_RETRO_ACHIEVEMENTS
@@ -298,7 +297,7 @@ constexpr std::array<HotkeyGroupInfo, NUM_HOTKEY_GROUPS> s_groups_info = {
 #ifdef USE_RETRO_ACHIEVEMENTS
     {{_trans("General"), HK_OPEN, HK_OPEN_ACHIEVEMENTS},
 #else   // USE_RETRO_ACHIEVEMENTS
-    {{_trans("General"), HK_OPEN, HK_OPEN_QUICK_MENU},
+    {{_trans("General"), HK_OPEN, HK_REQUEST_GOLF_CONTROL},
 #endif  // USE_RETRO_ACHIEVEMENTS
      {_trans("Volume"), HK_VOLUME_DOWN, HK_VOLUME_TOGGLE_MUTE},
      {_trans("Emulation Speed"), HK_DECREASE_EMULATION_SPEED, HK_TOGGLE_THROTTLE},
@@ -426,9 +425,6 @@ void HotkeyManager::LoadDefaults(const ControllerInterface& ciface)
   set_key_expression(HK_STEP_OUT, hotkey_string({"Shift", "F11"}));
   set_key_expression(HK_BP_TOGGLE, hotkey_string({"Shift", "F9"}));
   set_key_expression(HK_SCREENSHOT, "F9");
-  // Shift+Tab is commonly captured by Steam. Ctrl+Shift+Space is otherwise unused in Dolphin's
-  // default hotkey table and does not require a function key.
-  set_key_expression(HK_OPEN_QUICK_MENU, hotkey_string({"Ctrl", "Shift", "Space"}));
   set_key_expression(HK_WIIMOTE1_CONNECT, hotkey_string({"Alt", "F5"}));
   set_key_expression(HK_WIIMOTE2_CONNECT, hotkey_string({"Alt", "F6"}));
   set_key_expression(HK_WIIMOTE3_CONNECT, hotkey_string({"Alt", "F7"}));

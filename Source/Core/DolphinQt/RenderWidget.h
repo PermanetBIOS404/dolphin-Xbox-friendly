@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <cstdint>
+#include <string_view>
+
 #include <QEvent>
 #include <QWidget>
 
@@ -44,6 +47,7 @@ signals:
   void SizeChanged(int new_width, int new_height);
   void FocusChanged(bool focus);
   void QuickMenuControllerSettingsRequested();
+  void QuickMenuRebootRequested();
   void QuickMenuStopRequested();
 
 private:
@@ -59,8 +63,16 @@ private:
   void TryWiiPointerRecovery();
   void EnsureQuickMenu();
   void CloseQuickMenu(QuickMenuAction action);
-  void RequestQuickMenuFocusRestoration();
+  void StartQuickMenuFocusRestorationTransaction();
+  void QueueQuickMenuFocusRestoration(std::uint64_t generation, int delay_ms);
+  void EvaluateQuickMenuFocusRestoration(std::uint64_t generation, bool timer_attempt);
+  void RequestNativeRenderActivation();
   void CompleteQuickMenuCloseAfterFocus();
+  void BeginQuickMenuRecoveryTransaction();
+  void QueueQuickMenuRecoveryValidation(std::uint64_t generation);
+  void ValidateQuickMenuRecovery(std::uint64_t generation);
+  void CompleteQuickMenuRecoveryTransaction();
+  void FailQuickMenuRecoveryTransaction(std::string_view reason);
   void PassEventToPresenter(const QEvent* event);
   void SetPresenterKeyMap();
   void dragEnterEvent(QDragEnterEvent* event) override;
@@ -89,5 +101,13 @@ private:
   QuickMenuSession m_quick_menu_session;
   std::optional<QuickMenuAction> m_pending_quick_menu_action;
   bool m_resume_emulation_after_quick_menu_focus = false;
+  bool m_quick_menu_recovery_operation_started = false;
+  bool m_quick_menu_forced_failure_consumed = false;
+  unsigned int m_quick_menu_recovery_validation_successes = 0;
+  unsigned int m_quick_menu_recovery_transaction_count = 0;
+  QuickMenuBoundedPhase m_quick_menu_focus_restoration_phase{40};
+  QuickMenuBoundedPhase m_quick_menu_recovery_validation_phase{100};
+  std::optional<std::uint64_t> m_quick_menu_focus_timer_generation;
+  std::optional<std::uint64_t> m_quick_menu_recovery_timer_generation;
   MouseInputReconnectRequest m_mouse_reconnect_request;
 };

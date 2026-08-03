@@ -1,13 +1,16 @@
 // Copyright 2026 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <QAction>
 #include <QApplication>
+#include <QLabel>
 #include <QPushButton>
 #include <QWidget>
 
 #include <gtest/gtest.h>
 
 #include "DolphinQt/QuickMenu.h"
+#include "DolphinQt/QuickMenuState.h"
 
 namespace
 {
@@ -197,10 +200,133 @@ TEST(QuickMenuTest, HostButtonEmitsExactlyOneAction)
 
   ASSERT_TRUE(quick_menu.Open());
   const auto buttons = quick_menu.findChildren<QPushButton*>();
-  ASSERT_EQ(buttons.size(), 5);
+  ASSERT_EQ(buttons.size(), 6);
   buttons.front()->click();
 
   EXPECT_EQ(action_count, 1);
   EXPECT_EQ(requested_action, QuickMenuAction::Resume);
   quick_menu.Close();
+}
+
+TEST(QuickMenuTest, HostRecoveryMenuProvidesReconnectAndRebootFallbacks)
+{
+  GetTestApplication();
+
+  QWidget render_widget;
+  render_widget.setAttribute(Qt::WA_NativeWindow);
+  render_widget.resize(640, 480);
+  render_widget.show();
+  ProcessEvents();
+
+  QuickMenu quick_menu(&render_widget);
+  int action_count = 0;
+  QuickMenuAction requested_action = QuickMenuAction::Resume;
+  QObject::connect(&quick_menu, &QuickMenu::ActionRequested,
+                   [&action_count, &requested_action](QuickMenuAction action) {
+                     ++action_count;
+                     requested_action = action;
+                   });
+
+  ASSERT_TRUE(quick_menu.Open());
+  auto* const reconnect =
+      quick_menu.findChild<QPushButton*>(QStringLiteral("quickMenuReconnectMouseButton"));
+  auto* const reboot =
+      quick_menu.findChild<QPushButton*>(QStringLiteral("quickMenuRebootEmulationButton"));
+  ASSERT_NE(reconnect, nullptr);
+  ASSERT_NE(reboot, nullptr);
+  EXPECT_TRUE(reconnect->text().contains(QStringLiteral("Reconnect Mouse Input")));
+  EXPECT_TRUE(reboot->text().contains(QStringLiteral("Reboot Emulation")));
+
+  reconnect->click();
+  EXPECT_EQ(action_count, 1);
+  EXPECT_EQ(requested_action, QuickMenuAction::ReconnectMouseInput);
+
+  reboot->click();
+  EXPECT_EQ(action_count, 2);
+  EXPECT_EQ(requested_action, QuickMenuAction::RebootEmulation);
+  quick_menu.Close();
+}
+
+TEST(QuickMenuTest, HostMenuActionTriggersExactlyOnceWithoutShortcut)
+{
+  GetTestApplication();
+
+  QAction action(QStringLiteral("Dolphin Quick Menu"));
+  action.setObjectName(QStringLiteral("actionDolphinQuickMenu"));
+  int open_count = 0;
+  QObject::connect(&action, &QAction::triggered, [&open_count] { ++open_count; });
+
+  EXPECT_EQ(action.objectName(), QStringLiteral("actionDolphinQuickMenu"));
+  EXPECT_TRUE(action.shortcut().isEmpty());
+
+  // The host menu action opens directly without constructing HotkeyManager or loading a profile.
+  action.trigger();
+  EXPECT_EQ(open_count, 1);
+}
+
+TEST(QuickMenuTest, RecoveryFailureStatusIsVisibleAndConcise)
+{
+  GetTestApplication();
+  QWidget render_window;
+  QWidget render_widget(&render_window);
+  render_window.resize(800, 600);
+  render_widget.resize(800, 600);
+  render_window.show();
+  render_widget.show();
+  ProcessEvents();
+
+  QuickMenu quick_menu(&render_widget);
+  const QString message = QStringLiteral(
+      "Wii pointer recovery failed. Try Reconnect Mouse Input or open Controller Settings.");
+  quick_menu.SetStatusMessage(message);
+
+  const auto* const status =
+      quick_menu.findChild<QLabel*>(QStringLiteral("quickMenuStatusMessage"));
+  ASSERT_NE(status, nullptr);
+  EXPECT_EQ(status->text(), message);
+  EXPECT_FALSE(status->isHidden());
+}
+
+TEST(QuickMenuTest, FocusRestorationSucceedsAfterDelayedActivation)
+{
+  QuickMenuBoundedPhase phase(4);
+  const std::uint64_t generation = phase.Start();
+
+  EXPECT_EQ(phase.Advance(generation, false), QuickMenuBoundedPhaseResult::Waiting);
+  // Real focus events re-evaluate readiness without consuming the timer's bounded retry budget.
+  EXPECT_EQ(phase.Observe(generation, false), QuickMenuBoundedPhaseResult::Waiting);
+  EXPECT_EQ(phase.GetAttempts(), 1u);
+  EXPECT_EQ(phase.Advance(generation, false), QuickMenuBoundedPhaseResult::Waiting);
+  EXPECT_EQ(phase.Observe(generation, true), QuickMenuBoundedPhaseResult::Succeeded);
+  EXPECT_FALSE(phase.GetCurrentGeneration().has_value());
+}
+
+TEST(QuickMenuTest, MissingFocusEventCannotStallBoundedRestoration)
+{
+  QuickMenuBoundedPhase phase(3);
+  const std::uint64_t generation = phase.Start();
+
+  EXPECT_EQ(phase.Advance(generation, false), QuickMenuBoundedPhaseResult::Waiting);
+  EXPECT_EQ(phase.Advance(generation, false), QuickMenuBoundedPhaseResult::Waiting);
+  EXPECT_EQ(phase.Advance(generation, false), QuickMenuBoundedPhaseResult::TimedOut);
+  EXPECT_EQ(phase.GetAttempts(), 3u);
+  EXPECT_FALSE(phase.GetCurrentGeneration().has_value());
+}
+
+TEST(QuickMenuTest, StaleFocusAndRecoveryCallbacksCannotAffectNewerTransaction)
+{
+  QuickMenuBoundedPhase focus_phase(3);
+  const std::uint64_t old_focus = focus_phase.Start();
+  EXPECT_EQ(focus_phase.Advance(old_focus, false), QuickMenuBoundedPhaseResult::Waiting);
+  const std::uint64_t new_focus = focus_phase.Start();
+  EXPECT_EQ(focus_phase.Observe(old_focus, true), QuickMenuBoundedPhaseResult::Stale);
+  EXPECT_TRUE(focus_phase.IsCurrent(new_focus));
+  EXPECT_EQ(focus_phase.Observe(new_focus, true), QuickMenuBoundedPhaseResult::Succeeded);
+
+  QuickMenuBoundedPhase recovery_phase(3);
+  const std::uint64_t old_recovery = recovery_phase.Start();
+  const std::uint64_t new_recovery = recovery_phase.Start();
+  EXPECT_EQ(recovery_phase.Advance(old_recovery, false), QuickMenuBoundedPhaseResult::Stale);
+  EXPECT_EQ(recovery_phase.GetAttempts(), 0u);
+  EXPECT_TRUE(recovery_phase.IsCurrent(new_recovery));
 }

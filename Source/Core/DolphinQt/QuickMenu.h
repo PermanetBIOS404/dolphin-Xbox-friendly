@@ -10,6 +10,7 @@
 class QEvent;
 class QHideEvent;
 class QKeyEvent;
+class QLabel;
 class QShowEvent;
 
 class QuickMenu final : public QWidget
@@ -21,6 +22,7 @@ public:
 
   bool Open();
   void Close();
+  void SetStatusMessage(const QString& message);
   bool IsOpen() const { return m_open_requested; }
 
 signals:
@@ -38,5 +40,6 @@ private:
 
   QWidget* const m_render_widget;
   QWidget* const m_render_window;
+  QLabel* m_status_label = nullptr;
   bool m_open_requested = false;
 };

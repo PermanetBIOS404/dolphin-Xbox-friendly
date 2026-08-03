@@ -64,6 +64,25 @@ QuickMenu::QuickMenu(QWidget* render_widget)
   pause_note->setWordWrap(true);
   panel_layout->addWidget(pause_note);
 
+  auto* const recovery_note =
+      new QLabel(tr("If the Wii hand cursor is missing, reconnect input here without using the "
+                    "emulated pointer."),
+                 panel);
+  recovery_note->setObjectName(QStringLiteral("dolphinQuickMenuRecoveryNote"));
+  recovery_note->setAccessibleName(tr("Wii controller recovery help"));
+  recovery_note->setAlignment(Qt::AlignCenter);
+  recovery_note->setWordWrap(true);
+  panel_layout->addWidget(recovery_note);
+
+  m_status_label = new QLabel(panel);
+  m_status_label->setObjectName(QStringLiteral("quickMenuStatusMessage"));
+  m_status_label->setAccessibleName(tr("Quick Menu status"));
+  m_status_label->setAlignment(Qt::AlignCenter);
+  m_status_label->setWordWrap(true);
+  m_status_label->setStyleSheet(QStringLiteral("color: palette(highlight); font-weight: bold;"));
+  m_status_label->hide();
+  panel_layout->addWidget(m_status_label);
+
   const auto add_action = [this, panel, panel_layout](const QString& text,
                                                       const QString& object_name,
                                                       QuickMenuAction action) {
@@ -77,10 +96,15 @@ QuickMenu::QuickMenu(QWidget* render_widget)
 
   add_action(tr("Resume / Close Quick Menu"), QStringLiteral("quickMenuResumeButton"),
              QuickMenuAction::Resume);
-  add_action(tr("Restore Wii Pointer"), QStringLiteral("quickMenuRestorePointerButton"),
-             QuickMenuAction::RestoreWiiPointer);
-  add_action(tr("Reconnect Mouse Input"), QStringLiteral("quickMenuReconnectMouseButton"),
+  add_action(tr("Reconnect Mouse Input / Controllers"),
+             QStringLiteral("quickMenuReconnectMouseButton"),
              QuickMenuAction::ReconnectMouseInput);
+  add_action(tr("Restore Wii Pointer (Lightweight)"),
+             QStringLiteral("quickMenuRestorePointerButton"),
+             QuickMenuAction::RestoreWiiPointer);
+  add_action(tr("Reboot Emulation + Reconnect Input"),
+             QStringLiteral("quickMenuRebootEmulationButton"),
+             QuickMenuAction::RebootEmulation);
   add_action(tr("Open Controller Settings"), QStringLiteral("quickMenuControllerSettingsButton"),
              QuickMenuAction::OpenControllerSettings);
   add_action(tr("Stop Emulation"), QStringLiteral("quickMenuStopButton"),
@@ -175,18 +199,20 @@ bool QuickMenu::Open()
     const QRect resume_geometry = button_geometry("quickMenuResumeButton");
     const QRect restore_geometry = button_geometry("quickMenuRestorePointerButton");
     const QRect reconnect_geometry = button_geometry("quickMenuReconnectMouseButton");
+    const QRect reboot_geometry = button_geometry("quickMenuRebootEmulationButton");
     Common::PointerE2ETelemetry::Log(
         "quick_menu_post_event",
         fmt::format(
             "xid={} requested={} visible={} hidden={} active={} geometry={},{},{}x{} "
             "resume_geometry={},{},{}x{} restore_geometry={},{},{}x{} "
-            "reconnect_geometry={},{},{}x{}",
+            "reconnect_geometry={},{},{}x{} reboot_geometry={},{},{}x{}",
             winId(), m_open_requested, isVisible(), isHidden(), isActiveWindow(), geometry().x(),
             geometry().y(), geometry().width(), geometry().height(), resume_geometry.x(),
             resume_geometry.y(), resume_geometry.width(), resume_geometry.height(),
             restore_geometry.x(), restore_geometry.y(), restore_geometry.width(),
             restore_geometry.height(), reconnect_geometry.x(), reconnect_geometry.y(),
-            reconnect_geometry.width(), reconnect_geometry.height()));
+            reconnect_geometry.width(), reconnect_geometry.height(), reboot_geometry.x(),
+            reboot_geometry.y(), reboot_geometry.width(), reboot_geometry.height()));
     INFO_LOG_FMT(COMMON,
                  "Quick Menu post-event visibility: requested={}, visible={}, hidden={}, "
                  "active_window={}, geometry=({},{} {}x{})",
@@ -194,6 +220,12 @@ bool QuickMenu::Open()
                  geometry().y(), geometry().width(), geometry().height());
   });
   return isVisible() && !geometry().isEmpty();
+}
+
+void QuickMenu::SetStatusMessage(const QString& message)
+{
+  m_status_label->setText(message);
+  m_status_label->setVisible(!message.isEmpty());
 }
 
 void QuickMenu::Close()
