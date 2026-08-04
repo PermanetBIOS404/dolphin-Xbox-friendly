@@ -19,6 +19,8 @@ add_library(uicommon
   ResourcePack/ResourcePack.h
   UICommon.cpp
   UICommon.h
+  WiiExportPlan.cpp
+  WiiExportPlan.h
 )
 
 target_link_libraries(uicommon
