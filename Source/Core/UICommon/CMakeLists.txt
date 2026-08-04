@@ -19,6 +19,8 @@ add_library(uicommon
   ResourcePack/ResourcePack.h
   UICommon.cpp
   UICommon.h
+  WiiExportExecution.cpp
+  WiiExportExecution.h
   WiiExportPlan.cpp
   WiiExportPlan.h
 )

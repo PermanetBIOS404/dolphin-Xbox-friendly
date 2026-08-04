@@ -2,6 +2,7 @@ add_dolphin_test(MMIOTest MMIOTest.cpp)
 add_dolphin_test(PageFaultTest PageFaultTest.cpp)
 add_dolphin_test(CoreTimingTest CoreTimingTest.cpp)
 add_dolphin_test(PatchAllowlistTest PatchAllowlistTest.cpp)
+add_dolphin_test(WiiExportExecutionTest UICommon/WiiExportExecutionTest.cpp)
 add_dolphin_test(WiiExportPlanTest UICommon/WiiExportPlanTest.cpp)
 add_dolphin_test(WiimotePointerTest HW/WiimotePointerTest.cpp)
 
