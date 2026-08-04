@@ -324,6 +324,67 @@ TEST(WiiExportPlan, UnknownFilesystemSmallOutputUsesOneFile)
   EXPECT_FALSE(plan.splitting_required);
 }
 
+TEST(WiiExportPlan, SuccessfulFat32SinglePartRetainsDestinationFilesystem)
+{
+  const WiiExportPlan plan = UICommon::CreateWiiExportPlan(
+      MakeSource(), MakeDestination(WiiExportDestinationFilesystem::Fat32Limited));
+
+  ASSERT_TRUE(plan.succeeded);
+  EXPECT_EQ(WiiExportDestinationFilesystem::Fat32Limited, plan.destination_filesystem);
+}
+
+TEST(WiiExportPlan, SuccessfulLargeFilePlanRetainsDestinationFilesystem)
+{
+  const WiiExportPlan plan = UICommon::CreateWiiExportPlan(
+      MakeSource(), MakeDestination(WiiExportDestinationFilesystem::LargeFileCapable));
+
+  ASSERT_TRUE(plan.succeeded);
+  EXPECT_EQ(WiiExportDestinationFilesystem::LargeFileCapable, plan.destination_filesystem);
+}
+
+TEST(WiiExportPlan, ForcedSplitLargeFilePlanRetainsLargeFileDestinationFilesystem)
+{
+  const WiiExportPlan plan = UICommon::CreateWiiExportPlan(
+      MakeSource("Game", "RMGE01", WII_EXPORT_WBFS_SPLIT_SIZE + 1),
+      MakeDestination(WiiExportDestinationFilesystem::LargeFileCapable,
+                      WiiExportSplitPolicy::ForceSplit));
+
+  ASSERT_TRUE(plan.succeeded);
+  ASSERT_TRUE(plan.splitting_required);
+  EXPECT_EQ(WiiExportDestinationFilesystem::LargeFileCapable, plan.destination_filesystem);
+}
+
+TEST(WiiExportPlan, SuccessfulUnknownFilesystemPlanRetainsDestinationFilesystem)
+{
+  const WiiExportPlan plan = UICommon::CreateWiiExportPlan(
+      MakeSource(), MakeDestination(WiiExportDestinationFilesystem::Unknown));
+
+  ASSERT_TRUE(plan.succeeded);
+  EXPECT_EQ(WiiExportDestinationFilesystem::Unknown, plan.destination_filesystem);
+}
+
+TEST(WiiExportPlan, RejectedUndecidableSplitPlanRetainsUnknownDestinationFilesystem)
+{
+  const WiiExportPlan plan = UICommon::CreateWiiExportPlan(
+      MakeSource("Game", "RMGE01", WII_EXPORT_WBFS_SPLIT_SIZE + 1),
+      MakeDestination(WiiExportDestinationFilesystem::Unknown));
+
+  ASSERT_FALSE(plan.succeeded);
+  ASSERT_TRUE(HasError(plan, WiiExportPlanError::FilesystemCapabilityRequired));
+  EXPECT_EQ(WiiExportDestinationFilesystem::Unknown, plan.destination_filesystem);
+}
+
+TEST(WiiExportPlan, UnrelatedValidationErrorRetainsSuppliedDestinationFilesystem)
+{
+  const WiiExportPlan plan = UICommon::CreateWiiExportPlan(
+      MakeSource("Game", "INVALID"),
+      MakeDestination(WiiExportDestinationFilesystem::LargeFileCapable));
+
+  ASSERT_FALSE(plan.succeeded);
+  ASSERT_TRUE(HasError(plan, WiiExportPlanError::InvalidGameId));
+  EXPECT_EQ(WiiExportDestinationFilesystem::LargeFileCapable, plan.destination_filesystem);
+}
+
 TEST(WiiExportPlan, AssessesAvailableSpaceUsingMinimumOutputBytes)
 {
   WiiExportDestination insufficient = MakeDestination();
@@ -409,6 +470,7 @@ TEST(WiiExportPlan, NormalWiiSourceIsSupportableWithoutNKitRecoveryRequirement)
   EXPECT_EQ(DiscIO::BlobType::RVZ, plan.required_source_blob_type);
   EXPECT_EQ("/source/game.rvz", plan.source_path);
   EXPECT_EQ("/destination", plan.destination_root);
+  EXPECT_EQ(WiiExportDestinationFilesystem::Fat32Limited, plan.destination_filesystem);
 }
 
 TEST(WiiExportPlan, NKitSourceSeparatesPlayableExportFromArchivalRecovery)

@@ -106,6 +106,7 @@ WiiExportPlan CreateWiiExportPlan(const WiiExportSource& source,
   WiiExportPlan plan;
   plan.source_path = source.source_path;
   plan.destination_root = destination.destination_root;
+  plan.destination_filesystem = destination.filesystem;
   plan.required_source_blob_type = source.blob_type;
   plan.requires_nkit_input = source.is_nkit;
   plan.normalized_id6 = NormalizeGameId(source.game_id);

@@ -112,6 +112,8 @@ struct WiiExportPlan
 
   std::string source_path;
   std::string destination_root;
+  WiiExportDestinationFilesystem destination_filesystem =
+      WiiExportDestinationFilesystem::Unknown;
   DiscIO::BlobType required_source_blob_type = DiscIO::BlobType::PLAIN;
   bool requires_nkit_input = false;
 
