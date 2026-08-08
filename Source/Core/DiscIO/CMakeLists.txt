@@ -60,6 +60,7 @@ add_library(discio
   WbfsBlob.h
   WbfsWriter.cpp
   WbfsWriter.h
+  WbfsWriterPrivate.h
   WIABlob.cpp
   WIABlob.h
   WIACompression.cpp

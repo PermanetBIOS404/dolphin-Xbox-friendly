@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <functional>
 #include <string>
 #include <vector>
@@ -20,6 +21,8 @@ constexpr u8 WBFS_HOST_SECTOR_SHIFT = 9;
 constexpr u8 WBFS_BLOCK_SHIFT = 21;
 constexpr u64 WBFS_HOST_SECTOR_SIZE = 1ULL << WBFS_HOST_SECTOR_SHIFT;
 constexpr u64 WBFS_BLOCK_SIZE = 1ULL << WBFS_BLOCK_SHIFT;
+constexpr u64 WBFS_SPLIT_SIZE = 0xffff8000;
+constexpr size_t WBFS_MAX_PARTS = 10;
 
 enum class WbfsAnalysisError
 {
@@ -40,8 +43,8 @@ enum class WbfsBlockSelection
   FullBlockPreservationFallback,
 };
 
-// A successful instance is an immutable plan for one conventional single-file WBFS output.
-// Writing consumes its block map verbatim; it does not perform a second scrub analysis.
+// A successful instance is an immutable plan for one conventional logical WBFS output. Writing
+// consumes its block map verbatim; physical splitting does not perform a second scrub analysis.
 class WbfsAnalysis final
 {
 public:
@@ -100,6 +103,8 @@ enum class WbfsWriteStatus
   Success,
   Cancelled,
   InvalidAnalysis,
+  InvalidDestinationPath,
+  TooManyOutputParts,
   SourceMismatch,
   SourceReadFailed,
   DestinationExists,
@@ -108,6 +113,41 @@ enum class WbfsWriteStatus
   StructuralValidationFailed,
   FinalizationFailed,
 };
+
+enum class WbfsOutputPolicy
+{
+  SingleFile,
+  Split,
+};
+
+enum class WbfsOutputPlanError
+{
+  None,
+  InvalidDestinationPath,
+  InvalidLogicalSize,
+  InvalidSplitSize,
+  TooManyParts,
+};
+
+struct WbfsOutputPart final
+{
+  std::string path;
+  u64 size = 0;
+};
+
+struct WbfsOutputPlan final
+{
+  WbfsOutputPlanError error = WbfsOutputPlanError::InvalidDestinationPath;
+  u64 logical_size = 0;
+  std::vector<WbfsOutputPart> parts;
+
+  bool IsSuccessful() const { return error == WbfsOutputPlanError::None; }
+};
+
+// Plans the physical files for an already analyzed logical WBFS size. Split output always uses
+// the USB Loader GX-compatible 4 GiB - 32 KiB limit and supports .wbfs through .wbf9.
+WbfsOutputPlan PlanWbfsOutput(const std::string& primary_path, u64 logical_size,
+                              WbfsOutputPolicy output_policy);
 
 struct WbfsWriteProgress final
 {
@@ -125,15 +165,23 @@ struct WbfsWriteResult final
 {
   WbfsWriteStatus status = WbfsWriteStatus::InvalidAnalysis;
   u64 final_size = 0;
+  std::vector<std::string> final_paths;
 
   bool IsSuccessful() const { return status == WbfsWriteStatus::Success; }
 };
 
 // Writes through an exclusive temporary sibling, validates it with WbfsFileReader, then finalizes
 // it. The analyzed source and block map must still match; the destination is never intentionally
-// overwritten.
+// overwritten. This compatibility form always creates one physical file.
 WbfsWriteResult WriteWbfs(BlobReader& source, const WbfsAnalysis& analysis,
                           const std::string& destination_path,
+                          const WbfsProgressCallback& progress_callback = {},
+                          const WbfsCancellationCallback& cancellation_callback = {});
+
+// Generalized physical-output form. Split output is still one logical WBFS image; only its
+// storage is segmented into the planned .wbfs/.wbfN files.
+WbfsWriteResult WriteWbfs(BlobReader& source, const WbfsAnalysis& analysis,
+                          const std::string& destination_path, WbfsOutputPolicy output_policy,
                           const WbfsProgressCallback& progress_callback = {},
                           const WbfsCancellationCallback& cancellation_callback = {});
 
