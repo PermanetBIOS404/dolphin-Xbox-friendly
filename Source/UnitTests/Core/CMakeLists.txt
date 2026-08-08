@@ -5,6 +5,7 @@ add_dolphin_test(PatchAllowlistTest PatchAllowlistTest.cpp)
 add_dolphin_test(WiiExportExecutionTest UICommon/WiiExportExecutionTest.cpp)
 add_dolphin_test(WiiExportNativeBackendTest UICommon/WiiExportNativeBackendTest.cpp)
 add_dolphin_test(WiiExportPlanTest UICommon/WiiExportPlanTest.cpp)
+add_dolphin_test(WiiExportPreviewTest UICommon/WiiExportPreviewTest.cpp)
 add_dolphin_test(WbfsWriterTest WbfsWriterTest.cpp)
 add_dolphin_test(WiimotePointerTest HW/WiimotePointerTest.cpp)
 
@@ -17,6 +18,18 @@ if(ENABLE_QT)
   )
   set_target_properties(QuickMenuTest PROPERTIES AUTOMOC ON)
   target_link_libraries(QuickMenuTest PUBLIC Qt6::Widgets)
+
+  add_dolphin_test(WiiExportPreviewQtTest
+    ../DolphinQt/WiiExportPreviewQtTest.cpp
+    ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/QtUtils/DolphinFileDialog.cpp
+    ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/QtUtils/DolphinFileDialog.h
+    ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/WiiExportDestinationInspector.cpp
+    ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/WiiExportDestinationInspector.h
+    ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/WiiExportPreviewDialog.cpp
+    ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/WiiExportPreviewDialog.h
+  )
+  set_target_properties(WiiExportPreviewQtTest PROPERTIES AUTOMOC ON)
+  target_link_libraries(WiiExportPreviewQtTest PUBLIC Qt6::Widgets)
 
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(X11 REQUIRED)

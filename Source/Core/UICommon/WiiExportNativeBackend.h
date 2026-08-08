@@ -11,6 +11,10 @@
 
 namespace UICommon
 {
+// Returns the canonical native-backend descriptor without requiring a prepared source or reader.
+// Read-only clients such as export preview use this exact descriptor for Milestone B preflight.
+const WiiExportBackendDescriptor& GetWiiExportNativeBackendDescriptor();
+
 namespace WiiExportNativeBackendDetails
 {
 class Access;

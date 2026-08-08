@@ -265,6 +265,12 @@ void RemoveCreatedDirectories(const std::vector<std::string>& paths)
 }
 }  // namespace
 
+const WiiExportBackendDescriptor& GetWiiExportNativeBackendDescriptor()
+{
+  static const WiiExportBackendDescriptor descriptor = MakeDescriptor();
+  return descriptor;
+}
+
 DiscIO::WbfsOutputPolicy WiiExportNativeBackendDetails::GetOutputPolicy(
     const WiiExportPlan& plan)
 {
@@ -313,7 +319,7 @@ public:
        std::unique_ptr<WiiExportNativeBackendDetails::Writer> prepared_writer)
       : source_path(std::move(prepared_source_path)),
         source_reader(std::move(prepared_source_reader)), analysis(std::move(prepared_analysis)),
-        writer(std::move(prepared_writer)), descriptor(MakeDescriptor())
+        writer(std::move(prepared_writer)), descriptor(GetWiiExportNativeBackendDescriptor())
   {
   }
 

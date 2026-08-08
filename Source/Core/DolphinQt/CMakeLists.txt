@@ -318,6 +318,10 @@ add_executable(dolphin-emu
   NANDRepairDialog.h
   NKitWarningDialog.cpp
   NKitWarningDialog.h
+  WiiExportDestinationInspector.cpp
+  WiiExportDestinationInspector.h
+  WiiExportPreviewDialog.cpp
+  WiiExportPreviewDialog.h
   QtUtils/AnalyticsPrompt.cpp
   QtUtils/AnalyticsPrompt.h
   QtUtils/AspectRatioWidget.cpp
