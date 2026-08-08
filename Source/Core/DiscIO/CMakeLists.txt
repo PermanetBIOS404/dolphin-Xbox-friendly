@@ -58,6 +58,8 @@ add_library(discio
   VolumeWii.h
   WbfsBlob.cpp
   WbfsBlob.h
+  WbfsWriter.cpp
+  WbfsWriter.h
   WIABlob.cpp
   WIABlob.h
   WIACompression.cpp
