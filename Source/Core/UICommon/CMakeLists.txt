@@ -21,6 +21,9 @@ add_library(uicommon
   UICommon.h
   WiiExportExecution.cpp
   WiiExportExecution.h
+  WiiExportNativeBackend.cpp
+  WiiExportNativeBackend.h
+  WiiExportNativeBackendPrivate.h
   WiiExportPlan.cpp
   WiiExportPlan.h
 )
