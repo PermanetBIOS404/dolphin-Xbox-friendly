@@ -301,3 +301,124 @@ Options:
   -q, --quiet           Mute all messages except for errors.
   -g, --gameonly        Only extracts the DATA partition.
 ```
+
+
+## SD Card Modes
+
+Dolphin RWiN supports two ways to provide an SD card to the emulated Wii:
+
+- **Physical SD Card** — use a real SD card inserted into your computer.
+- **Virtual SD Card** — use Dolphin's virtual SD-card image instead of physical removable media.
+
+### Physical SD Card
+
+Use **Physical SD** when you want Dolphin RWiN and a real Wii to work with the same physical SD card.
+
+On Linux, your desktop will usually mount an SD card automatically when you insert it. Dolphin RWiN needs direct access to the device in Physical SD mode, so the card must be:
+
+- connected to the computer;
+- **unmounted** from Linux; and
+- **not ejected or physically removed**.
+
+If the card is mounted, Dolphin RWiN may refuse to start Wii emulation with Physical SD enabled.
+
+#### Unmounting on Linux
+
+You can unmount the card from your desktop's file manager, or from a terminal with:
+
+```bash
+udisksctl unmount -b /dev/disk/by-uuid/YOUR-SD-UUID
+```
+
+Replace `YOUR-SD-UUID` with the UUID of your own SD card.
+
+Unmounting is **not** the same as ejecting. Leave the SD card inserted after unmounting so Dolphin RWiN can access it.
+
+After unmounting:
+
+1. Leave the SD card connected.
+2. Start Dolphin RWiN.
+3. Enable or select **Physical SD**.
+4. Boot the Wii Menu, Homebrew Channel, or other Wii software normally.
+
+If Dolphin RWiN reports that the physical SD card is mounted, stop emulation, unmount the card, and try again.
+
+> **Important:** Do not unplug, eject, or remove a physical SD card while Dolphin RWiN is actively using it.
+
+### Virtual SD Card
+
+You do **not** need a real SD card to use Dolphin RWiN.
+
+Use **Virtual SD** when you want Dolphin to provide an emulated SD card without direct access to physical removable media.
+
+Virtual SD is recommended when:
+
+- you do not have a physical SD card;
+- you only use the SD card inside Dolphin;
+- you do not need to share the same card with a real Wii;
+- you want the simplest setup;
+- you do not want to unmount and remount removable media.
+
+### Which mode should I use?
+
+| Situation | Recommended mode |
+| --- | --- |
+| I want Dolphin and my real Wii to use the same SD card | **Physical SD** |
+| I am testing Wii homebrew before moving it to real hardware | **Physical SD** or **Virtual SD**, depending on your workflow |
+| I do not own or currently have access to a Wii | **Virtual SD** |
+| I do not have an SD card | **Virtual SD** |
+| I only need SD functionality inside Dolphin | **Virtual SD** |
+| I want to work directly with the files already on my Wii SD card | **Physical SD** |
+
+## Physical SD Workflow
+
+A typical Physical SD workflow on Linux is:
+
+```text
+Insert SD card
+    ↓
+Linux mounts the card
+    ↓
+Unmount the filesystem
+    ↓
+Leave the card physically connected
+    ↓
+Start Dolphin RWiN
+    ↓
+Dolphin gets direct SD access
+    ↓
+Boot Wii Menu / Homebrew Channel
+```
+
+When you are finished with Dolphin RWiN, you may mount the SD card again through your desktop environment or file manager.
+
+## Virtual SD Workflow
+
+A typical Virtual SD workflow is:
+
+```text
+Start Dolphin RWiN
+    ↓
+Use Virtual SD
+    ↓
+Dolphin provides the emulated SD card
+    ↓
+Boot Wii Menu / Homebrew Channel
+```
+
+No physical SD card or device-level access is required.
+
+## Why Dolphin RWiN Supports Both
+
+The goal is to support both kinds of users:
+
+- people who still use a real Wii and want Dolphin RWiN to work with their existing SD-card setup; and
+- people who use Dolphin only and prefer a self-contained Virtual SD environment.
+
+Physical SD is useful for real-hardware development and testing. Virtual SD keeps the setup simple when direct hardware access is unnecessary.
+
+## Future UX Goal
+
+A future Dolphin RWiN update is intended to make Physical SD setup easier by detecting when an SD card is mounted and guiding the user through the required steps directly in the UI.
+
+The goal is for routine setup to require **no terminal commands**.
