@@ -7,6 +7,10 @@
 
 #include "Common/CommonTypes.h"
 
+#if defined(__linux__) && !defined(ANDROID)
+#include "Core/IOS/SDIO/SDStoragePreflight.h"
+#endif
+
 namespace Config
 {
 enum class WiiSDStorageMode : int;
@@ -40,6 +44,10 @@ private:
   void CreateWhitelistedUSBPassthroughDevices();
   void CreateWiiRemoteSettings();
   void UpdateSDCardControls();
+#if defined(__linux__) && !defined(ANDROID)
+  void RefreshPhysicalSDStatus();
+  void OnUnmountPhysicalSD();
+#endif
 
   void OnEmulationStateChanged(bool running);
 
@@ -85,6 +93,10 @@ private:
   ConfigText* m_sd_physical_device_edit;
   QLabel* m_sd_physical_device_label;
   QLabel* m_sd_physical_read_only_warning;
+  QLabel* m_sd_physical_mount_status;
+  QPushButton* m_sd_physical_unmount_button;
+  IOS::HLE::PhysicalSDPreflightOutcome m_detected_physical_sd;
+  bool m_sd_unmount_in_progress = false;
 #endif
   bool m_is_running = false;
 

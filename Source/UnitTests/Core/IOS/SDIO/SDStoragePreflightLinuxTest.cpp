@@ -176,6 +176,7 @@ TEST(SDStoragePreflightLinuxTest, StableSymlinkResolvesToBlockDevice)
   const PhysicalSDPreflightOutcome outcome = preflight->Check("/simulated/by-uuid/card-id");
   EXPECT_EQ(outcome.result, PhysicalSDPreflightResult::Ready);
   EXPECT_EQ(outcome.resolved_path, "/devices/card-partition");
+  EXPECT_EQ(outcome.device_identity, (PhysicalSDDeviceIdentity{8, 17}));
   EXPECT_EQ(operations->opened_path, "/devices/card-partition");
 }
 
@@ -225,6 +226,7 @@ TEST(SDStoragePreflightLinuxTest, AcceptsUnmountedBlockDevice)
   const PhysicalSDPreflightOutcome outcome = preflight->Check("/simulated/block");
   EXPECT_EQ(outcome.result, PhysicalSDPreflightResult::Ready);
   EXPECT_EQ(outcome.resolved_path, "/simulated/block");
+  EXPECT_EQ(outcome.device_identity, (PhysicalSDDeviceIdentity{8, 17}));
   EXPECT_EQ(operations->mountinfo_calls, 1);
   EXPECT_EQ(operations->open_calls, 1);
   EXPECT_EQ(operations->close_calls, 1);
@@ -240,6 +242,7 @@ TEST(SDStoragePreflightLinuxTest, DetectsMountedDeviceByMajorMinorUnderDifferent
   const PhysicalSDPreflightOutcome outcome = preflight->Check("/simulated/configured");
   EXPECT_EQ(outcome.result, PhysicalSDPreflightResult::Mounted);
   EXPECT_EQ(outcome.mount_point, "/mnt/card");
+  EXPECT_EQ(outcome.device_identity, (PhysicalSDDeviceIdentity{8, 33}));
   EXPECT_EQ(operations->open_calls, 0);
 }
 
@@ -256,6 +259,7 @@ TEST(SDStoragePreflightLinuxTest, DetectsMountedDeviceThroughStableSymlink)
   EXPECT_EQ(outcome.result, PhysicalSDPreflightResult::Mounted);
   EXPECT_EQ(outcome.resolved_path, "/devices/card-partition");
   EXPECT_EQ(outcome.mount_point, "/mnt/card");
+  EXPECT_EQ(outcome.device_identity, (PhysicalSDDeviceIdentity{8, 41}));
   EXPECT_EQ(operations->open_calls, 0);
 }
 

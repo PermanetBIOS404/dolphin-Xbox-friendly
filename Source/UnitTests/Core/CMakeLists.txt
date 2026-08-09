@@ -104,10 +104,16 @@ add_dolphin_test(ESFormatsTest IOS/ES/FormatsTest.cpp)
 add_dolphin_test(FileSystemTest IOS/FS/FileSystemTest.cpp)
 
 add_dolphin_test(SDStorageTest IOS/SDIO/SDStorageTest.cpp)
+add_dolphin_test(PhysicalSDUnmountTest IOS/SDIO/PhysicalSDUnmountTest.cpp)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
   add_dolphin_test(SDStorageLinuxTest IOS/SDIO/SDStorageLinuxTest.cpp)
   add_dolphin_test(SDStoragePreflightLinuxTest IOS/SDIO/SDStoragePreflightLinuxTest.cpp)
+  if(ENABLE_QT)
+    add_dolphin_test(PhysicalSDUnmountUDisksTest
+      UICommon/PhysicalSDUnmountUDisksTest.cpp
+    )
+  endif()
 endif()
 
 add_dolphin_test(SkylandersTest IOS/USB/SkylandersTest.cpp)

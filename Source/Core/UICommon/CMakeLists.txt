@@ -50,7 +50,12 @@ endif()
 
 if(UNIX AND NOT APPLE AND NOT ANDROID AND ENABLE_QT)
   find_package(Qt6 REQUIRED COMPONENTS DBus)
-  target_sources(uicommon PRIVATE DBusUtils.cpp)
+  target_sources(uicommon PRIVATE
+    DBusUtils.cpp
+    PhysicalSDUnmountUDisks.cpp
+    PhysicalSDUnmountUDisks.h
+    PhysicalSDUnmountUDisksPrivate.h
+  )
   target_compile_definitions(uicommon PRIVATE -DHAVE_QTDBUS=1)
   target_link_libraries(uicommon PUBLIC Qt6::DBus)
 endif()

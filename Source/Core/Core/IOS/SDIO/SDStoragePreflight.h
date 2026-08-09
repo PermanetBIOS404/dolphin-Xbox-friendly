@@ -4,6 +4,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace IOS::HLE
@@ -21,11 +22,20 @@ enum class PhysicalSDPreflightResult
   IoError,
 };
 
+struct PhysicalSDDeviceIdentity
+{
+  unsigned int device_major = 0;
+  unsigned int device_minor = 0;
+
+  bool operator==(const PhysicalSDDeviceIdentity&) const = default;
+};
+
 struct PhysicalSDPreflightOutcome
 {
   PhysicalSDPreflightResult result = PhysicalSDPreflightResult::IoError;
   std::string resolved_path;
   std::string mount_point;
+  std::optional<PhysicalSDDeviceIdentity> device_identity;
 };
 
 class PhysicalSDPreflight

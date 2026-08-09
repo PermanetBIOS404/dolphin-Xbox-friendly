@@ -225,8 +225,8 @@ std::string GetPhysicalSDStorageErrorMessage(std::string_view path,
   std::string guidance;
   if (open_result.preflight.result == PhysicalSDPreflightResult::Mounted)
   {
-    guidance =
-        "Unmount the SD card from Linux, but do not eject or physically remove it, then try again.";
+    guidance = "Open Settings > Wii and use Unmount SD Card; do not eject or physically remove "
+               "the card, then try again.";
   }
   else if (open_result.result == SDStorageResult::PermissionDenied)
   {

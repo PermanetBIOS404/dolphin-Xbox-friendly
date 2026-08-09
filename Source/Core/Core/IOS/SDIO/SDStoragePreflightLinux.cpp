@@ -233,18 +233,34 @@ public:
     std::string mountinfo;
     int error = 0;
     if (!m_operations->ReadMountInfo(&mountinfo, &error))
-      return {.result = PhysicalSDPreflightResult::IoError, .resolved_path = resolved.resolved_path};
+    {
+      return {
+          .result = PhysicalSDPreflightResult::IoError,
+          .resolved_path = resolved.resolved_path,
+          .device_identity = PhysicalSDDeviceIdentity{resolved.device_major,
+                                                      resolved.device_minor},
+      };
+    }
 
     const MountInfoResult mount =
         FindMountPoint(mountinfo, resolved.device_major, resolved.device_minor);
     if (!mount.valid)
-      return {.result = PhysicalSDPreflightResult::IoError, .resolved_path = resolved.resolved_path};
+    {
+      return {
+          .result = PhysicalSDPreflightResult::IoError,
+          .resolved_path = resolved.resolved_path,
+          .device_identity = PhysicalSDDeviceIdentity{resolved.device_major,
+                                                      resolved.device_minor},
+      };
+    }
     if (mount.mount_point)
     {
       return {
           .result = PhysicalSDPreflightResult::Mounted,
           .resolved_path = resolved.resolved_path,
           .mount_point = *mount.mount_point,
+          .device_identity = PhysicalSDDeviceIdentity{resolved.device_major,
+                                                      resolved.device_minor},
       };
     }
 
@@ -257,6 +273,8 @@ public:
       return {
           .result = ResultFromErrno(errno),
           .resolved_path = resolved.resolved_path,
+          .device_identity = PhysicalSDDeviceIdentity{resolved.device_major,
+                                                      resolved.device_minor},
       };
     }
 
@@ -266,12 +284,16 @@ public:
       return {
           .result = PhysicalSDPreflightResult::IoError,
           .resolved_path = resolved.resolved_path,
+          .device_identity = PhysicalSDDeviceIdentity{resolved.device_major,
+                                                      resolved.device_minor},
       };
     }
 
     return {
         .result = PhysicalSDPreflightResult::Ready,
         .resolved_path = resolved.resolved_path,
+        .device_identity =
+            PhysicalSDDeviceIdentity{resolved.device_major, resolved.device_minor},
     };
   }
 
