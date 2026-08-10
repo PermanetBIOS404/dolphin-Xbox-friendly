@@ -46,6 +46,7 @@ private:
   void UpdateSDCardControls();
 #if defined(__linux__) && !defined(ANDROID)
   void RefreshPhysicalSDStatus();
+  void OnMountPhysicalSD();
   void OnUnmountPhysicalSD();
 #endif
 
@@ -94,9 +95,16 @@ private:
   QLabel* m_sd_physical_device_label;
   QLabel* m_sd_physical_read_only_warning;
   QLabel* m_sd_physical_mount_status;
+  QPushButton* m_sd_physical_mount_button;
   QPushButton* m_sd_physical_unmount_button;
   IOS::HLE::PhysicalSDPreflightOutcome m_detected_physical_sd;
-  bool m_sd_unmount_in_progress = false;
+  enum class PhysicalSDOperation
+  {
+    None,
+    Mount,
+    Unmount,
+  };
+  PhysicalSDOperation m_sd_operation = PhysicalSDOperation::None;
 #endif
   bool m_is_running = false;
 

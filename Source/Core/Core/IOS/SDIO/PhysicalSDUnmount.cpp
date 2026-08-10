@@ -9,34 +9,6 @@ namespace IOS::HLE
 {
 namespace
 {
-bool IsSameDevice(const PhysicalSDPreflightOutcome& first,
-                  const PhysicalSDPreflightOutcome& second)
-{
-  return first.device_identity && second.device_identity &&
-         first.device_identity == second.device_identity &&
-         first.resolved_path == second.resolved_path;
-}
-
-bool IndicatesChangedDevice(PhysicalSDPreflightResult result)
-{
-  switch (result)
-  {
-  case PhysicalSDPreflightResult::EmptyPath:
-  case PhysicalSDPreflightResult::Missing:
-  case PhysicalSDPreflightResult::NotBlockDevice:
-    return true;
-  case PhysicalSDPreflightResult::Ready:
-  case PhysicalSDPreflightResult::PermissionDenied:
-  case PhysicalSDPreflightResult::Mounted:
-  case PhysicalSDPreflightResult::BusyOrInUse:
-  case PhysicalSDPreflightResult::UnsupportedPlatform:
-  case PhysicalSDPreflightResult::IoError:
-    return false;
-  }
-
-  return false;
-}
-
 PhysicalSDUnmountOutcome DeviceChanged(std::string_view when)
 {
   return {
@@ -77,7 +49,7 @@ PhysicalSDUnmountOutcome HandlePhysicalSDUnmountAction(
 
   const PhysicalSDPreflightOutcome before = preflight.Check(configured_path);
   if (before.result == PhysicalSDPreflightResult::Ready &&
-      IsSameDevice(detected_device, before))
+      IsSamePhysicalSDDevice(detected_device, before))
   {
     return {
         .result = PhysicalSDUnmountResult::AlreadyUnmounted,
@@ -85,9 +57,9 @@ PhysicalSDUnmountOutcome HandlePhysicalSDUnmountAction(
     };
   }
 
-  if (!IsSameDevice(detected_device, before))
+  if (!IsSamePhysicalSDDevice(detected_device, before))
   {
-    if (IndicatesChangedDevice(before.result) || before.device_identity ||
+    if (PhysicalSDPreflightIndicatesChangedDevice(before.result) || before.device_identity ||
         before.resolved_path != detected_device.resolved_path)
     {
       return DeviceChanged("before the request");
@@ -118,9 +90,9 @@ PhysicalSDUnmountOutcome HandlePhysicalSDUnmountAction(
   }
 
   const PhysicalSDPreflightOutcome after = preflight.Check(configured_path);
-  if (!IsSameDevice(detected_device, after))
+  if (!IsSamePhysicalSDDevice(detected_device, after))
   {
-    if (IndicatesChangedDevice(after.result) || after.device_identity ||
+    if (PhysicalSDPreflightIndicatesChangedDevice(after.result) || after.device_identity ||
         after.resolved_path != detected_device.resolved_path)
     {
       return DeviceChanged("while the request was running");

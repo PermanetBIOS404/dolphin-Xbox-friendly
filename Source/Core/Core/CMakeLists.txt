@@ -438,6 +438,8 @@ add_library(core
   IOS/Network/WD/Command.h
   IOS/SDIO/SDIOSlot0.cpp
   IOS/SDIO/SDIOSlot0.h
+  IOS/SDIO/PhysicalSDMount.cpp
+  IOS/SDIO/PhysicalSDMount.h
   IOS/SDIO/PhysicalSDUnmount.cpp
   IOS/SDIO/PhysicalSDUnmount.h
   IOS/SDIO/SDStorage.cpp

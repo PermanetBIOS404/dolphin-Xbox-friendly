@@ -28,6 +28,7 @@
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
+#include "Core/IOS/SDIO/PhysicalSDMount.h"
 #include "Core/IOS/SDIO/PhysicalSDUnmount.h"
 #include "Core/IOS/SDIO/SDStorageConfig.h"
 #include "Core/IOS/SDIO/SDStoragePreflight.h"
@@ -218,8 +219,8 @@ void WiiPane::CreateSDCard()
       new QLabel(tr("Read-only physical device mode: stable /dev/disk/by-uuid paths are "
                     "recommended, and Dolphin will reject every write. If the filesystem is "
                     "mounted, use Unmount SD Card below while leaving the card and reader "
-                    "connected. Unmount detaches the filesystem; Eject may power down or remove "
-                    "the device."));
+                    "connected. After Physical SD use has stopped, Mount SD Card returns the "
+                    "filesystem to Linux. Neither action ejects or powers off the device."));
   m_sd_physical_read_only_warning->setObjectName(QStringLiteral("sd_physical_read_only_warning"));
   m_sd_physical_read_only_warning->setWordWrap(true);
   sd_settings_group_layout->addWidget(m_sd_physical_read_only_warning, row, 0, 1, 2);
@@ -227,15 +228,24 @@ void WiiPane::CreateSDCard()
 
   m_sd_physical_mount_status = new QLabel;
   m_sd_physical_mount_status->setObjectName(QStringLiteral("sd_physical_mount_status"));
+  m_sd_physical_mount_status->setTextFormat(Qt::PlainText);
   m_sd_physical_mount_status->setWordWrap(true);
   sd_settings_group_layout->addWidget(m_sd_physical_mount_status, row, 0, 1, 2);
   ++row;
 
+  auto* sd_mount_actions = new QHBoxLayout;
+  sd_mount_actions->addStretch();
+  m_sd_physical_mount_button = new NonDefaultQPushButton(tr("Mount SD Card"));
+  m_sd_physical_mount_button->setObjectName(QStringLiteral("sd_physical_mount_button"));
+  connect(m_sd_physical_mount_button, &QPushButton::clicked, this,
+          &WiiPane::OnMountPhysicalSD);
+  sd_mount_actions->addWidget(m_sd_physical_mount_button);
   m_sd_physical_unmount_button = new NonDefaultQPushButton(tr("Unmount SD Card"));
   m_sd_physical_unmount_button->setObjectName(QStringLiteral("sd_physical_unmount_button"));
   connect(m_sd_physical_unmount_button, &QPushButton::clicked, this,
           &WiiPane::OnUnmountPhysicalSD);
-  sd_settings_group_layout->addWidget(m_sd_physical_unmount_button, row, 1);
+  sd_mount_actions->addWidget(m_sd_physical_unmount_button);
+  sd_settings_group_layout->addLayout(sd_mount_actions, row, 0, 1, 2);
   ++row;
 #endif
 
@@ -434,6 +444,7 @@ void WiiPane::UpdateSDCardControls()
   else
   {
     m_detected_physical_sd = {};
+    m_sd_physical_mount_button->setVisible(false);
     m_sd_physical_unmount_button->setVisible(false);
   }
 #endif
@@ -460,15 +471,22 @@ void WiiPane::RefreshPhysicalSDStatus()
   {
     m_detected_physical_sd = {};
     m_sd_physical_mount_status->setText(
-        tr("Status: Not checked while emulation is running."));
+        tr("Status: In use by Dolphin. Stop emulation before mounting or unmounting the "
+           "filesystem."));
+    m_sd_physical_mount_button->setVisible(false);
     m_sd_physical_unmount_button->setVisible(false);
     return;
   }
 
-  if (m_sd_unmount_in_progress)
+  if (m_sd_operation != PhysicalSDOperation::None)
   {
-    m_sd_physical_mount_status->setText(tr("Status: Requesting filesystem unmount..."));
-    m_sd_physical_unmount_button->setVisible(true);
+    const bool mounting = m_sd_operation == PhysicalSDOperation::Mount;
+    m_sd_physical_mount_status->setText(
+        mounting ? tr("Status: Requesting filesystem mount...") :
+                   tr("Status: Requesting filesystem unmount..."));
+    m_sd_physical_mount_button->setVisible(mounting);
+    m_sd_physical_mount_button->setEnabled(false);
+    m_sd_physical_unmount_button->setVisible(!mounting);
     m_sd_physical_unmount_button->setEnabled(false);
     return;
   }
@@ -526,16 +544,129 @@ void WiiPane::RefreshPhysicalSDStatus()
     break;
   }
 
-  const bool unmount_available =
-      IOS::HLE::IsPhysicalSDUnmountAvailable(m_detected_physical_sd);
+  const bool mount_available =
+      IOS::HLE::IsPhysicalSDMountAvailable(m_detected_physical_sd, false);
+  const bool unmount_available = IOS::HLE::IsPhysicalSDUnmountAvailable(m_detected_physical_sd);
+  m_sd_physical_mount_button->setVisible(mount_available);
+  m_sd_physical_mount_button->setEnabled(mount_available && !m_is_running);
   m_sd_physical_unmount_button->setVisible(unmount_available);
   m_sd_physical_unmount_button->setEnabled(unmount_available && !m_is_running);
+}
+
+void WiiPane::OnMountPhysicalSD()
+{
+  const bool raw_device_in_use =
+      m_is_running || !Core::IsUninitialized(Core::System::GetInstance());
+  if (raw_device_in_use || m_sd_operation != PhysicalSDOperation::None ||
+      !IOS::HLE::IsPhysicalSDMountAvailable(m_detected_physical_sd, false))
+  {
+    return;
+  }
+
+  const std::string configured_path =
+      Config::Get(Config::MAIN_WII_SD_PHYSICAL_DEVICE_PATH);
+  const QString target = QString::fromStdString(m_detected_physical_sd.resolved_path);
+  const int answer = ModalMessageBox::question(
+      this, tr("Mount Physical SD Card"),
+      tr("Mount the filesystem on %1 for normal Linux access?\n\nLinux will choose the mount "
+         "point. Dolphin will not eject or power off the SD card.")
+          .arg(target),
+      QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+
+  auto preflight = IOS::HLE::CreatePhysicalSDPreflight();
+  UICommon::UDisks2PhysicalSDMountBackend backend;
+  const auto action = answer == QMessageBox::Yes ? IOS::HLE::PhysicalSDMountAction::Mount :
+                                                   IOS::HLE::PhysicalSDMountAction::Cancel;
+
+  if (action == IOS::HLE::PhysicalSDMountAction::Mount)
+  {
+    m_sd_operation = PhysicalSDOperation::Mount;
+    RefreshPhysicalSDStatus();
+    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+  }
+
+  const bool raw_device_now_in_use =
+      m_is_running || !Core::IsUninitialized(Core::System::GetInstance());
+  const IOS::HLE::PhysicalSDMountOutcome outcome = IOS::HLE::HandlePhysicalSDMountAction(
+      action, raw_device_now_in_use, configured_path, m_detected_physical_sd, *preflight, backend);
+  if (outcome.result == IOS::HLE::PhysicalSDMountResult::Cancelled)
+    return;
+
+  m_sd_operation = PhysicalSDOperation::None;
+  RefreshPhysicalSDStatus();
+
+  const QString diagnostic = QString::fromStdString(outcome.diagnostic);
+  const QString mount_point = QString::fromStdString(outcome.mount_point).toHtmlEscaped();
+  switch (outcome.result)
+  {
+  case IOS::HLE::PhysicalSDMountResult::Success:
+    ModalMessageBox::information(
+        this, tr("Physical SD Card Mounted"),
+        tr("The SD card filesystem is mounted for normal Linux access.<br><br>Mounted at:<br>"
+           "<code>%1</code>")
+            .arg(mount_point));
+    return;
+  case IOS::HLE::PhysicalSDMountResult::AlreadyMounted:
+    ModalMessageBox::information(
+        this, tr("Physical SD Card Mounted"),
+        mount_point.isEmpty() ? tr("The SD card filesystem is already mounted.") :
+                                tr("The SD card filesystem is already mounted at:<br><code>%1"
+                                   "</code>")
+                                    .arg(mount_point));
+    return;
+  case IOS::HLE::PhysicalSDMountResult::BackendUnavailable:
+    ModalMessageBox::warning(
+        this, tr("Unable to Mount SD Card"),
+        tr("The Linux UDisks2 service is unavailable. The card remains unmounted.\n\n%1")
+            .arg(diagnostic));
+    return;
+  case IOS::HLE::PhysicalSDMountResult::PermissionDenied:
+    ModalMessageBox::warning(
+        this, tr("Unable to Mount SD Card"),
+        tr("Linux did not authorize the mount. The card remains unmounted.\n\n%1")
+            .arg(diagnostic));
+    return;
+  case IOS::HLE::PhysicalSDMountResult::BusyOrRefused:
+    ModalMessageBox::warning(
+        this, tr("Unable to Mount SD Card"),
+        tr("Linux refused the mount because the SD card is busy.\n\n%1").arg(diagnostic));
+    return;
+  case IOS::HLE::PhysicalSDMountResult::RawDeviceInUse:
+    ModalMessageBox::warning(
+        this, tr("Unable to Mount SD Card"),
+        tr("Dolphin is still using the Physical SD device. Stop emulation, then try again."));
+    return;
+  case IOS::HLE::PhysicalSDMountResult::UnsupportedFilesystem:
+    ModalMessageBox::warning(
+        this, tr("Unable to Mount SD Card"),
+        tr("UDisks2 does not expose a supported filesystem for the selected partition.\n\n%1")
+            .arg(diagnostic));
+    return;
+  case IOS::HLE::PhysicalSDMountResult::MalformedResponse:
+    ModalMessageBox::warning(
+        this, tr("Unable to Verify SD Card Mount"),
+        tr("UDisks2 returned an unexpected mount response. Dolphin refreshed the displayed "
+           "status; check it before using the card.\n\n%1")
+            .arg(diagnostic));
+    return;
+  case IOS::HLE::PhysicalSDMountResult::DeviceChanged:
+  case IOS::HLE::PhysicalSDMountResult::InvalidSelection:
+  case IOS::HLE::PhysicalSDMountResult::Failed:
+    ModalMessageBox::warning(
+        this, tr("Unable to Mount SD Card"),
+        tr("Dolphin could not safely complete and verify the mount. Check the refreshed Physical "
+           "SD status before using the card.\n\n%1")
+            .arg(diagnostic));
+    return;
+  case IOS::HLE::PhysicalSDMountResult::Cancelled:
+    return;
+  }
 }
 
 void WiiPane::OnUnmountPhysicalSD()
 {
   if (m_is_running || !Core::IsUninitialized(Core::System::GetInstance()) ||
-      m_sd_unmount_in_progress ||
+      m_sd_operation != PhysicalSDOperation::None ||
       !IOS::HLE::IsPhysicalSDUnmountAvailable(m_detected_physical_sd))
   {
     return;
@@ -559,7 +690,7 @@ void WiiPane::OnUnmountPhysicalSD()
 
   if (action == IOS::HLE::PhysicalSDUnmountAction::Unmount)
   {
-    m_sd_unmount_in_progress = true;
+    m_sd_operation = PhysicalSDOperation::Unmount;
     RefreshPhysicalSDStatus();
     QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
   }
@@ -569,7 +700,7 @@ void WiiPane::OnUnmountPhysicalSD()
   if (outcome.result == IOS::HLE::PhysicalSDUnmountResult::Cancelled)
     return;
 
-  m_sd_unmount_in_progress = false;
+  m_sd_operation = PhysicalSDOperation::None;
   RefreshPhysicalSDStatus();
 
   const QString diagnostic = QString::fromStdString(outcome.diagnostic);

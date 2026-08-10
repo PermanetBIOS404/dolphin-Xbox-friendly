@@ -24,6 +24,34 @@ public:
 };
 }  // namespace
 
+bool IsSamePhysicalSDDevice(const PhysicalSDPreflightOutcome& first,
+                            const PhysicalSDPreflightOutcome& second)
+{
+  return first.device_identity && second.device_identity &&
+         first.device_identity == second.device_identity &&
+         first.resolved_path == second.resolved_path;
+}
+
+bool PhysicalSDPreflightIndicatesChangedDevice(PhysicalSDPreflightResult result)
+{
+  switch (result)
+  {
+  case PhysicalSDPreflightResult::EmptyPath:
+  case PhysicalSDPreflightResult::Missing:
+  case PhysicalSDPreflightResult::NotBlockDevice:
+    return true;
+  case PhysicalSDPreflightResult::Ready:
+  case PhysicalSDPreflightResult::PermissionDenied:
+  case PhysicalSDPreflightResult::Mounted:
+  case PhysicalSDPreflightResult::BusyOrInUse:
+  case PhysicalSDPreflightResult::UnsupportedPlatform:
+  case PhysicalSDPreflightResult::IoError:
+    return false;
+  }
+
+  return false;
+}
+
 std::unique_ptr<PhysicalSDPreflight> CreatePhysicalSDPreflight()
 {
 #if defined(__linux__) && !defined(ANDROID)

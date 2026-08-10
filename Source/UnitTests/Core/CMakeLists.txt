@@ -104,6 +104,7 @@ add_dolphin_test(ESFormatsTest IOS/ES/FormatsTest.cpp)
 add_dolphin_test(FileSystemTest IOS/FS/FileSystemTest.cpp)
 
 add_dolphin_test(SDStorageTest IOS/SDIO/SDStorageTest.cpp)
+add_dolphin_test(PhysicalSDMountTest IOS/SDIO/PhysicalSDMountTest.cpp)
 add_dolphin_test(PhysicalSDUnmountTest IOS/SDIO/PhysicalSDUnmountTest.cpp)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)

@@ -48,5 +48,12 @@ public:
   virtual PhysicalSDPreflightOutcome Check(const std::string& path) = 0;
 };
 
+// These comparisons are shared by user-triggered mount management operations. Matching both the
+// resolved path and major/minor identity prevents a reused device path from targeting a different
+// partition between detection and action.
+bool IsSamePhysicalSDDevice(const PhysicalSDPreflightOutcome& first,
+                            const PhysicalSDPreflightOutcome& second);
+bool PhysicalSDPreflightIndicatesChangedDevice(PhysicalSDPreflightResult result);
+
 std::unique_ptr<PhysicalSDPreflight> CreatePhysicalSDPreflight();
 }  // namespace IOS::HLE
