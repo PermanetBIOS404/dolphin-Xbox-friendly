@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cmath>
 #include <future>
+#include <optional>
 #include <utility>
 
 #include <QDesktopServices>
@@ -38,6 +39,7 @@
 #include <QMenu>
 #include <QShortcut>
 #include <QSortFilterProxyModel>
+#include <QStringList>
 #include <QTableView>
 #include <QUrl>
 
@@ -61,6 +63,7 @@
 #include "DolphinQt/ConvertDialog.h"
 #include "DolphinQt/GameList/GridProxyModel.h"
 #include "DolphinQt/GameList/ListProxyModel.h"
+#include "DolphinQt/GameList/WiiExportGameListExecution.h"
 #include "DolphinQt/GameList/WiiExportGameListPreview.h"
 #include "DolphinQt/MenuBar.h"
 #include "DolphinQt/QtUtils/DolphinFileDialog.h"
@@ -129,6 +132,107 @@ QString GetWiiExportPreparationErrorMessage(
     return GameList::tr("The selected source cannot be represented safely as WBFS.");
   }
   return GameList::tr("The WBFS export preview could not analyze the selected source.");
+}
+
+QString GetWiiExportRevalidationErrorMessage(
+    const DolphinQt::WiiExportGameListExecutionResult& result)
+{
+  using Error = DolphinQt::WiiExportGameListRevalidationError;
+  switch (result.revalidation_error)
+  {
+  case Error::None:
+    return {};
+  case Error::InvalidPreview:
+    return GameList::tr("The export preview is no longer valid. Review the destination again.");
+  case Error::SourceRevalidationFailed:
+    return GetWiiExportPreparationErrorMessage(result.source_revalidation);
+  case Error::DestinationRevalidationFailed:
+    return GameList::tr("The selected destination is no longer an available directory.");
+  case Error::RevalidatedPreviewBlocked:
+    if (result.revalidated_preview)
+    {
+      const UICommon::WiiExportPreflightResult& preflight =
+          result.revalidated_preview->preflight;
+      if (UICommon::HasWiiExportPreflightBlocker(
+              preflight, UICommon::WiiExportPreflightBlocker::DestinationCollision))
+      {
+        return GameList::tr(
+            "An output file appeared at the destination after the preview. Nothing was "
+            "overwritten.");
+      }
+      if (UICommon::HasWiiExportPreflightBlocker(
+              preflight, UICommon::WiiExportPreflightBlocker::InsufficientSpace))
+      {
+        return GameList::tr("The destination no longer has enough free space for this export.");
+      }
+      if (UICommon::HasWiiExportPreflightBlocker(
+              preflight, UICommon::WiiExportPreflightBlocker::UnsupportedSourceBlobType) ||
+          UICommon::HasWiiExportPreflightBlocker(
+              preflight, UICommon::WiiExportPreflightBlocker::MissingBackendCapability))
+      {
+        return GameList::tr("The source is no longer supported by the native WBFS exporter.");
+      }
+    }
+    return GameList::tr("Fresh safety checks blocked this export. Review the preview again.");
+  case Error::SourceChanged:
+    return GameList::tr(
+        "The Wii game source changed after the preview. Reopen the export assistant to review it.");
+  case Error::PlanChanged:
+    return GameList::tr(
+        "The destination or planned output changed after the preview. Review the new plan before "
+        "exporting.");
+  case Error::BackendUnavailable:
+    return GameList::tr("The native WBFS exporter could not reopen the selected source.");
+  }
+  return GameList::tr("Fresh safety checks could not prepare this export.");
+}
+
+QString GetWiiExportExecutionFailureMessage(const UICommon::WiiExportExecutionResult& result)
+{
+  switch (result.outcome)
+  {
+  case UICommon::WiiExportExecutionOutcome::Succeeded:
+  case UICommon::WiiExportExecutionOutcome::Cancelled:
+    return {};
+  case UICommon::WiiExportExecutionOutcome::Blocked:
+    if (UICommon::HasWiiExportPreflightBlocker(
+            result.preflight, UICommon::WiiExportPreflightBlocker::DestinationCollision))
+    {
+      return GameList::tr("An output file already exists. Nothing was overwritten.");
+    }
+    if (UICommon::HasWiiExportPreflightBlocker(
+            result.preflight, UICommon::WiiExportPreflightBlocker::InsufficientSpace))
+    {
+      return GameList::tr("The destination does not have enough free space.");
+    }
+    return GameList::tr("The export was blocked by its final safety check.");
+  case UICommon::WiiExportExecutionOutcome::Failed:
+    return result.backend_diagnostic.empty() ?
+               GameList::tr("The native WBFS exporter could not complete the export.") :
+               GameList::tr("The native WBFS exporter could not complete the export.\n\nDetails: "
+                            "%1")
+                   .arg(QString::fromStdString(result.backend_diagnostic));
+  case UICommon::WiiExportExecutionOutcome::ContractViolation:
+    return GameList::tr(
+        "The export backend returned an invalid result. Dolphin did not report success.");
+  }
+  return GameList::tr("The export could not be completed.");
+}
+
+QString GetWiiExportStageName(UICommon::WiiExportExecutionStage stage)
+{
+  switch (stage)
+  {
+  case UICommon::WiiExportExecutionStage::Preparing:
+    return GameList::tr("Preparing");
+  case UICommon::WiiExportExecutionStage::Exporting:
+    return GameList::tr("Exporting");
+  case UICommon::WiiExportExecutionStage::Finalizing:
+    return GameList::tr("Finalizing");
+  case UICommon::WiiExportExecutionStage::Verifying:
+    return GameList::tr("Verifying");
+  }
+  return GameList::tr("Exporting");
 }
 
 class GameListTableView : public QTableView
@@ -729,7 +833,7 @@ void GameList::PreviewWiiExport(const std::shared_ptr<const UICommon::GameFile>&
   progress.GetRaw()->setMinimumDuration(500);
 
   std::future<DolphinQt::WiiExportGameListPreviewPreparation> future =
-      std::async(std::launch::async, [entry = std::move(entry), destination, &progress] {
+      std::async(std::launch::async, [entry, destination, &progress] {
         DolphinQt::WiiExportGameListPreviewPreparation result =
             DolphinQt::PrepareWiiExportGameListPreview(entry, destination);
         progress.Reset();
@@ -747,7 +851,110 @@ void GameList::PreviewWiiExport(const std::shared_ptr<const UICommon::GameFile>&
 
   WiiExportPreviewDialog dialog(std::move(*preparation.source.prepared_source), this);
   dialog.SelectDestinationInspection(std::move(preparation.destination));
-  dialog.exec();
+  if (dialog.exec() != QDialog::Accepted)
+    return;
+
+  std::optional<DolphinQt::WiiExportGameListExecutionRequest> execution_request =
+      DolphinQt::CreateWiiExportGameListExecutionRequest(
+          entry, dialog.GetPreparedSource(), dialog.GetPreviewState());
+  if (!execution_request)
+  {
+    ModalMessageBox::critical(
+        this, tr("Wii Export Assistant"),
+        tr("The current preview cannot be exported. Review its status and destination."));
+    return;
+  }
+  RunWiiExport(*execution_request);
+}
+
+void GameList::RunWiiExport(const DolphinQt::WiiExportGameListExecutionRequest& request)
+{
+  constexpr int progress_maximum = 1000;
+  const QString title = QString::fromStdString(request.entry.display_title);
+  const QDir destination(QString::fromStdString(request.preview_plan.destination_root));
+  const QString planned_output =
+      destination.filePath(QString::fromStdString(request.preview_plan.primary_relative_path));
+
+  ParallelProgressDialog progress(
+      tr("Revalidating %1 before export...\n%2").arg(title, planned_output), tr("Cancel"), 0, 0,
+      this);
+  progress.GetRaw()->setWindowModality(Qt::WindowModal);
+  progress.GetRaw()->setWindowTitle(tr("Wii Export Assistant"));
+  progress.GetRaw()->setMinimumDuration(250);
+
+  std::future<DolphinQt::WiiExportGameListExecutionResult> future =
+      std::async(std::launch::async, [request, title, planned_output, &progress] {
+        const UICommon::WiiExportProgressCallback progress_callback =
+            [&progress, &title, &planned_output](const UICommon::WiiExportProgress& event) {
+              progress.SetRange(0, progress_maximum);
+              const int scaled_value =
+                  event.total_output_bytes == 0 ?
+                      0 :
+                      static_cast<int>(event.completed_output_bytes * progress_maximum /
+                                       event.total_output_bytes);
+              // WriteWbfs reports all output bytes written before structural validation and
+              // publication. Keep QProgressDialog below its auto-close threshold until the full
+              // execution contract reports success.
+              progress.SetValue(std::min(scaled_value, progress_maximum - 1));
+              progress.SetLabelText(
+                  GameList::tr("%1 %2\n%3\nPart %4 of %5")
+                      .arg(GetWiiExportStageName(event.stage), title, planned_output)
+                      .arg(event.current_part_index + 1)
+                      .arg(event.total_part_count));
+            };
+        DolphinQt::WiiExportGameListExecutionResult result =
+            DolphinQt::RunWiiExportGameListExecution(
+                request, progress_callback, [&progress] { return progress.WasCanceled(); });
+        if (result.execution &&
+            result.execution->outcome == UICommon::WiiExportExecutionOutcome::Succeeded)
+        {
+          progress.SetValue(progress_maximum);
+        }
+        progress.Reset();
+        return result;
+      });
+  progress.GetRaw()->exec();
+  DolphinQt::WiiExportGameListExecutionResult result = future.get();
+
+  if (result.revalidation_error != DolphinQt::WiiExportGameListRevalidationError::None)
+  {
+    ModalMessageBox::critical(this, tr("Wii Export Assistant"),
+                              GetWiiExportRevalidationErrorMessage(result));
+    return;
+  }
+  if (!result.execution)
+  {
+    ModalMessageBox::critical(this, tr("Wii Export Assistant"),
+                              tr("The export did not return a result."));
+    return;
+  }
+
+  switch (result.execution->outcome)
+  {
+  case UICommon::WiiExportExecutionOutcome::Succeeded:
+  {
+    QStringList output_paths;
+    for (const std::string& relative_path : result.execution->final_relative_paths)
+      output_paths.append(destination.filePath(QString::fromStdString(relative_path)));
+    ModalMessageBox::information(
+        this, tr("Wii Export Assistant"),
+        tr("Export complete.\n\n%1\n%2\n\nOutput:\n%3")
+            .arg(title, QString::fromStdString(request.entry.game_id),
+                 output_paths.join(QLatin1Char('\n'))));
+    return;
+  }
+  case UICommon::WiiExportExecutionOutcome::Cancelled:
+    ModalMessageBox::information(
+        this, tr("Wii Export Assistant"),
+        tr("Export cancelled.\nNo completed output was created."));
+    return;
+  case UICommon::WiiExportExecutionOutcome::Failed:
+  case UICommon::WiiExportExecutionOutcome::Blocked:
+  case UICommon::WiiExportExecutionOutcome::ContractViolation:
+    ModalMessageBox::critical(this, tr("Wii Export Assistant"),
+                              GetWiiExportExecutionFailureMessage(*result.execution));
+    return;
+  }
 }
 
 void GameList::OpenWiki()

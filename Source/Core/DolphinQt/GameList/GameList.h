@@ -20,6 +20,11 @@ namespace UICommon
 class GameFile;
 }
 
+namespace DolphinQt
+{
+struct WiiExportGameListExecutionRequest;
+}
+
 class GameList final : public QStackedWidget
 {
   Q_OBJECT
@@ -81,6 +86,7 @@ private:
   void UninstallWAD();
   void ExportWiiSave();
   void PreviewWiiExport(const std::shared_ptr<const UICommon::GameFile>& game);
+  void RunWiiExport(const DolphinQt::WiiExportGameListExecutionRequest& request);
   void ConvertFile();
   void ChangeDisc();
   void NewTag();

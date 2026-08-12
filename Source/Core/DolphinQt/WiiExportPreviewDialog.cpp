@@ -231,6 +231,10 @@ WiiExportPreviewDialog::WiiExportPreviewDialog(
   status_layout->addWidget(m_messages);
 
   auto* const buttons = new QDialogButtonBox(QDialogButtonBox::Close);
+  m_export_button = buttons->addButton(tr("Export"), QDialogButtonBox::AcceptRole);
+  m_export_button->setObjectName(QStringLiteral("wiiExportButton"));
+  m_export_button->setAutoDefault(false);
+  m_export_button->setDefault(false);
   auto* const main_layout = new QVBoxLayout(this);
   main_layout->addWidget(source_group);
   main_layout->addWidget(destination_group);
@@ -244,12 +248,18 @@ WiiExportPreviewDialog::WiiExportPreviewDialog(
     SetSplitPolicy(static_cast<UICommon::WiiExportSplitPolicy>(id));
   });
   connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+  connect(m_export_button, &QPushButton::clicked, this, &QDialog::accept);
   UpdatePresentation();
 }
 
 const UICommon::WiiExportPreviewState& WiiExportPreviewDialog::GetPreviewState() const
 {
   return m_model.GetState();
+}
+
+const UICommon::WiiExportPreparedSource& WiiExportPreviewDialog::GetPreparedSource() const
+{
+  return m_model.GetPreparedSource();
 }
 
 bool WiiExportPreviewDialog::SelectDestinationPath(const QString& selected_path)
@@ -331,6 +341,7 @@ void WiiExportPreviewDialog::UpdatePresentation()
     m_status->setText(tr("Blocked"));
     break;
   }
+  m_export_button->setEnabled(state.readiness != UICommon::WiiExportPreviewReadiness::Blocked);
 
   QStringList messages;
   for (const UICommon::WiiExportPreviewIssue issue : state.issues)

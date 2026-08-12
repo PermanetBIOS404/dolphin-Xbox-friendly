@@ -279,6 +279,8 @@ add_executable(dolphin-emu
   GameList/GridProxyModel.h
   GameList/ListProxyModel.cpp
   GameList/ListProxyModel.h
+  GameList/WiiExportGameListExecution.cpp
+  GameList/WiiExportGameListExecution.h
   GameList/WiiExportGameListPreview.cpp
   GameList/WiiExportGameListPreview.h
   GCMemcardCreateNewDialog.cpp

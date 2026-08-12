@@ -252,7 +252,7 @@ TEST(WiiExportPreviewQtTest, ExistingSymlinkCannotRedirectInspectionOutsideRoot)
             UICommon::WiiExportPlannedPathInspectionError::PathEscapesDestination);
 }
 
-TEST(WiiExportPreviewQtTest, DialogConstructsOffscreenWithPreviewOnlyControlsAndNoWrites)
+TEST(WiiExportPreviewQtTest, DialogConstructsWithDisabledExportAndNoWrites)
 {
   GetTestApplication();
   QTemporaryDir directory;
@@ -263,11 +263,10 @@ TEST(WiiExportPreviewQtTest, DialogConstructsOffscreenWithPreviewOnlyControlsAnd
   EXPECT_EQ(dialog.windowTitle(), QStringLiteral("Wii Export Assistant"));
   EXPECT_NE(dialog.findChild<QPushButton*>(QStringLiteral("wiiExportBrowseButton")), nullptr);
   EXPECT_NE(dialog.findChild<QListWidget*>(QStringLiteral("wiiExportPlannedPaths")), nullptr);
-  const QList<QPushButton*> push_buttons = dialog.findChildren<QPushButton*>();
-  EXPECT_EQ(std::ranges::count_if(push_buttons, [](const QPushButton* button) {
-              return button->text().contains(QStringLiteral("Export"), Qt::CaseInsensitive);
-            }),
-            0);
+  auto* const export_button =
+      dialog.findChild<QPushButton*>(QStringLiteral("wiiExportButton"));
+  ASSERT_NE(export_button, nullptr);
+  EXPECT_FALSE(export_button->isEnabled());
   EXPECT_EQ(dialog.GetPreviewState().readiness,
             UICommon::WiiExportPreviewReadiness::Blocked);
   EXPECT_EQ(DirectoryEntries(directory.path()), before);

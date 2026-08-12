@@ -15,6 +15,7 @@ class QButtonGroup;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QPushButton;
 
 class WiiExportPreviewDialog final : public QDialog
 {
@@ -25,6 +26,7 @@ public:
                                   QWidget* parent = nullptr);
 
   const UICommon::WiiExportPreviewState& GetPreviewState() const;
+  const UICommon::WiiExportPreparedSource& GetPreparedSource() const;
 
   // Also used by the future C6 entry point and focused tests. An empty path represents a
   // cancelled chooser and leaves the current destination unchanged.
@@ -47,4 +49,5 @@ private:
   QListWidget* m_planned_paths = nullptr;
   QLabel* m_status = nullptr;
   QLabel* m_messages = nullptr;
+  QPushButton* m_export_button = nullptr;
 };

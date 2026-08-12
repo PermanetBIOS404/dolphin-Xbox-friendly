@@ -382,12 +382,10 @@ TEST(WiiExportGameListPreviewQtTest, PreviewDialogShowsSourcePathAndCreatesNoOut
       dialog.findChild<QLabel*>(QStringLiteral("wiiExportSourcePath"));
   ASSERT_NE(source_path, nullptr);
   EXPECT_EQ(source_path->text(), QString::fromStdString(MakeEntry().source_path));
-  EXPECT_EQ(std::ranges::count_if(dialog.findChildren<QPushButton*>(),
-                                  [](const QPushButton* button) {
-                                    return button->text().contains(
-                                        QStringLiteral("Export"), Qt::CaseInsensitive);
-                                  }),
-            0);
+  auto* const export_button =
+      dialog.findChild<QPushButton*>(QStringLiteral("wiiExportButton"));
+  ASSERT_NE(export_button, nullptr);
+  EXPECT_TRUE(export_button->isEnabled());
   dialog.reject();
   EXPECT_EQ(DirectoryEntries(destination.path()), before);
 }
