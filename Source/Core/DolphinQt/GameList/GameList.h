@@ -80,6 +80,7 @@ private:
   void InstallWAD();
   void UninstallWAD();
   void ExportWiiSave();
+  void PreviewWiiExport(const std::shared_ptr<const UICommon::GameFile>& game);
   void ConvertFile();
   void ChangeDisc();
   void NewTag();

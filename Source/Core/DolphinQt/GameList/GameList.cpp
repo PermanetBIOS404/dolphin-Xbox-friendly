@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <future>
 #include <utility>
 
 #include <QDesktopServices>
@@ -60,20 +61,76 @@
 #include "DolphinQt/ConvertDialog.h"
 #include "DolphinQt/GameList/GridProxyModel.h"
 #include "DolphinQt/GameList/ListProxyModel.h"
+#include "DolphinQt/GameList/WiiExportGameListPreview.h"
 #include "DolphinQt/MenuBar.h"
 #include "DolphinQt/QtUtils/DolphinFileDialog.h"
 #include "DolphinQt/QtUtils/DoubleClickEventFilter.h"
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 #include "DolphinQt/QtUtils/NonAutodismissibleMenu.h"
+#include "DolphinQt/QtUtils/ParallelProgressDialog.h"
 #include "DolphinQt/QtUtils/QtUtils.h"
 #include "DolphinQt/Resources.h"
 #include "DolphinQt/Settings.h"
 #include "DolphinQt/WiiUpdate.h"
+#include "DolphinQt/WiiExportPreviewDialog.h"
 
 #include "UICommon/GameFile.h"
 
 namespace
 {
+QString GetWiiExportPreparationErrorMessage(
+    const DolphinQt::WiiExportGameListSourcePreparation& result)
+{
+  using Error = DolphinQt::WiiExportGameListPreparationError;
+  switch (result.error)
+  {
+  case Error::None:
+    return {};
+  case Error::IneligibleEntry:
+    return GameList::tr("The selected item is no longer an eligible Wii disc game.");
+  case Error::SourceMissing:
+    return GameList::tr("The selected Wii game file is no longer available.");
+  case Error::SourceOpenFailed:
+    return GameList::tr("The selected Wii game file could not be opened as a disc image.");
+  case Error::SourceIsNotWiiDisc:
+    return GameList::tr("The selected source is no longer recognized as a Wii disc.");
+  case Error::SourceIdentityChanged:
+    return GameList::tr(
+        "The selected source no longer matches the Wii game shown in the Game List.");
+  case Error::AnalysisFailed:
+    break;
+  }
+
+  if (!result.analysis_error)
+    return GameList::tr("The WBFS export preview could not analyze the selected source.");
+
+  switch (*result.analysis_error)
+  {
+  case DiscIO::WbfsAnalysisError::None:
+    break;
+  case DiscIO::WbfsAnalysisError::NotWiiDisc:
+    return GameList::tr("The selected source is not a valid Wii disc.");
+  case DiscIO::WbfsAnalysisError::InvalidGameId:
+    return GameList::tr("The selected Wii disc does not have a valid six-character game ID.");
+  case DiscIO::WbfsAnalysisError::UnsupportedSourceFormat:
+    return GameList::tr(
+        "This source format cannot be exported by the native WBFS exporter. "
+        "Conventional ISO and RVZ sources are supported.");
+  case DiscIO::WbfsAnalysisError::InaccurateSourceSize:
+    return GameList::tr("This source does not provide the accurate logical size required for a "
+                        "playable WBFS export.");
+  case DiscIO::WbfsAnalysisError::NKitSource:
+    return GameList::tr("NKit input is not supported by the native WBFS exporter.");
+  case DiscIO::WbfsAnalysisError::InvalidSourceSize:
+    return GameList::tr("The selected Wii disc reports an invalid source size.");
+  case DiscIO::WbfsAnalysisError::SourceReadFailed:
+    return GameList::tr("The selected Wii disc could not be read during WBFS analysis.");
+  case DiscIO::WbfsAnalysisError::GeometryOverflow:
+    return GameList::tr("The selected source cannot be represented safely as WBFS.");
+  }
+  return GameList::tr("The WBFS export preview could not analyze the selected source.");
+}
+
 class GameListTableView : public QTableView
 {
 public:
@@ -465,6 +522,14 @@ void GameList::ShowContextMenu(const QPoint&)
                                                     Settings::Instance().NANDRefresh();
                                                   });
       perform_disc_update->setEnabled(Core::IsUninitialized(system) || !system.IsWii());
+
+      const DolphinQt::WiiExportGameListEntry export_entry =
+          DolphinQt::MakeWiiExportGameListEntry(*game, {});
+      if (DolphinQt::IsWiiExportGameListEntryEligible(export_entry))
+      {
+        menu->addAction(tr("Export for USB Loader GX..."), this,
+                        [this, game] { PreviewWiiExport(game); });
+      }
     }
 
     if (!is_mod_descriptor && platform == DiscIO::Platform::WiiWAD)
@@ -629,6 +694,60 @@ void GameList::ExportWiiSave()
   {
     ModalMessageBox::information(this, tr("Save Export"), tr("Successfully exported save files"));
   }
+}
+
+void GameList::PreviewWiiExport(const std::shared_ptr<const UICommon::GameFile>& game)
+{
+  if (!game)
+    return;
+
+  DolphinQt::WiiExportGameListEntry entry = DolphinQt::MakeWiiExportGameListEntry(
+      *game, game->GetName(Core::TitleDatabase()));
+  if (!DolphinQt::IsWiiExportGameListEntryEligible(entry))
+  {
+    ModalMessageBox::critical(
+        this, tr("Wii Export Assistant"),
+        GetWiiExportPreparationErrorMessage(
+            {.error = entry.source_available ?
+                          DolphinQt::WiiExportGameListPreparationError::IneligibleEntry :
+                          DolphinQt::WiiExportGameListPreparationError::SourceMissing}));
+    return;
+  }
+
+  const QString destination = DolphinFileDialog::getExistingDirectory(
+      this, tr("Select Wii Export Destination"),
+      QString::fromStdString(File::GetUserPath(D_USER_IDX)),
+      QFileDialog::ShowDirsOnly | QFileDialog::ReadOnly);
+  if (destination.isEmpty())
+    return;
+
+  ParallelProgressDialog progress(tr("Analyzing Wii game for export preview..."), QString{}, 0, 0,
+                                  this);
+  progress.GetRaw()->setWindowModality(Qt::WindowModal);
+  progress.GetRaw()->setWindowTitle(tr("Wii Export Assistant"));
+  progress.GetRaw()->setCancelButton(nullptr);
+  progress.GetRaw()->setMinimumDuration(500);
+
+  std::future<DolphinQt::WiiExportGameListPreviewPreparation> future =
+      std::async(std::launch::async, [entry = std::move(entry), destination, &progress] {
+        DolphinQt::WiiExportGameListPreviewPreparation result =
+            DolphinQt::PrepareWiiExportGameListPreview(entry, destination);
+        progress.Reset();
+        return result;
+      });
+  progress.GetRaw()->exec();
+  DolphinQt::WiiExportGameListPreviewPreparation preparation = future.get();
+
+  if (!preparation.IsPrepared())
+  {
+    ModalMessageBox::critical(this, tr("Wii Export Assistant"),
+                              GetWiiExportPreparationErrorMessage(preparation.source));
+    return;
+  }
+
+  WiiExportPreviewDialog dialog(std::move(*preparation.source.prepared_source), this);
+  dialog.SelectDestinationInspection(std::move(preparation.destination));
+  dialog.exec();
 }
 
 void GameList::OpenWiki()

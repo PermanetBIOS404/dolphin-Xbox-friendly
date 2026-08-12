@@ -31,6 +31,14 @@ if(ENABLE_QT)
   set_target_properties(WiiExportPreviewQtTest PROPERTIES AUTOMOC ON)
   target_link_libraries(WiiExportPreviewQtTest PUBLIC Qt6::Widgets)
 
+  add_dolphin_test(WiiExportGameListPreviewQtTest
+    ../DolphinQt/WiiExportGameListPreviewQtTest.cpp
+    ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/GameList/WiiExportGameListPreview.cpp
+    ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/GameList/WiiExportGameListPreview.h
+  )
+  set_target_properties(WiiExportGameListPreviewQtTest PROPERTIES AUTOMOC ON)
+  target_link_libraries(WiiExportGameListPreviewQtTest PUBLIC Qt6::Widgets)
+
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(X11 REQUIRED)
     find_package(PkgConfig REQUIRED)

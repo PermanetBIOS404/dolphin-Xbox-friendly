@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include <QString>
 
 #include <QDialog>
@@ -27,6 +29,8 @@ public:
   // Also used by the future C6 entry point and focused tests. An empty path represents a
   // cancelled chooser and leaves the current destination unchanged.
   bool SelectDestinationPath(const QString& selected_path);
+  bool SelectDestinationInspection(
+      std::optional<UICommon::WiiExportDestinationInspection> destination);
 
 private:
   void BrowseForDestination();

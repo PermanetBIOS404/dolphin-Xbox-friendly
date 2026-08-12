@@ -152,6 +152,11 @@ WiiExportPreviewDialog::WiiExportPreviewDialog(
   auto* const source_layout = new QFormLayout(source_group);
   source_layout->addRow(tr("Title:"), new QLabel(QString::fromStdString(source.display_title)));
   source_layout->addRow(tr("ID6:"), new QLabel(QString::fromStdString(source.game_id)));
+  auto* const source_path = new QLabel(QString::fromStdString(source.source_path));
+  source_path->setObjectName(QStringLiteral("wiiExportSourcePath"));
+  source_path->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  source_path->setWordWrap(true);
+  source_layout->addRow(tr("Source path:"), source_path);
   std::string source_format = DiscIO::GetName(source.blob_type, true);
   if (source.is_nkit)
     source_format += " (NKit)";
@@ -252,7 +257,16 @@ bool WiiExportPreviewDialog::SelectDestinationPath(const QString& selected_path)
   if (selected_path.isEmpty())
     return false;
 
-  m_model.SelectDestination(DolphinQt::InspectWiiExportDestination(selected_path));
+  return SelectDestinationInspection(DolphinQt::InspectWiiExportDestination(selected_path));
+}
+
+bool WiiExportPreviewDialog::SelectDestinationInspection(
+    std::optional<UICommon::WiiExportDestinationInspection> destination)
+{
+  if (!destination)
+    return false;
+
+  m_model.SelectDestination(std::move(destination));
   UpdatePresentation();
   return true;
 }
