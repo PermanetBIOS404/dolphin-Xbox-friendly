@@ -43,6 +43,8 @@ if(ENABLE_QT)
     ../DolphinQt/WiiExportGameListExecutionQtTest.cpp
     ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/GameList/WiiExportGameListExecution.cpp
     ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/GameList/WiiExportGameListExecution.h
+    ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/GameList/WiiExportProgressDialog.cpp
+    ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/GameList/WiiExportProgressDialog.h
   )
   set_target_properties(WiiExportGameListExecutionQtTest PROPERTIES AUTOMOC ON)
   target_link_libraries(WiiExportGameListExecutionQtTest PUBLIC Qt6::Widgets)

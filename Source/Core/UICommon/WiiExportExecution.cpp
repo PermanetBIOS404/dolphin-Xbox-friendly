@@ -289,6 +289,14 @@ WiiExportExecutionResult ExecuteWiiExport(
           progress_callback(event);
       };
 
+  validating_progress_callback({
+      .stage = WiiExportExecutionStage::Preparing,
+      .completed_output_bytes = 0,
+      .total_output_bytes = request.GetExpectedTotalOutputBytes(),
+      .current_part_index = 0,
+      .total_part_count = request.GetPlan().total_part_count,
+  });
+
   WiiExportBackendResult backend_result = backend.Execute(
       request, validating_progress_callback, cooperative_cancellation_query);
   result.final_relative_paths = std::move(backend_result.final_relative_paths);
@@ -330,6 +338,15 @@ WiiExportExecutionResult ExecuteWiiExport(
 
   result.outcome = WiiExportExecutionOutcome::Succeeded;
   result.reason = WiiExportExecutionReason::None;
+  validating_progress_callback({
+      .stage = WiiExportExecutionStage::Completed,
+      .completed_output_bytes = request.GetExpectedTotalOutputBytes(),
+      .total_output_bytes = request.GetExpectedTotalOutputBytes(),
+      .current_part_index = request.GetPlan().total_part_count == 0 ?
+                                0 :
+                                request.GetPlan().total_part_count - 1,
+      .total_part_count = request.GetPlan().total_part_count,
+  });
   return result;
 }
 }  // namespace UICommon

@@ -102,12 +102,16 @@ bool IsCancelled(const WbfsCancellationCallback& callback)
 
 void ReportProgress(const WbfsProgressCallback& callback, u64 completed_bytes, u64 total_bytes,
                     u64 logical_wbfs_block, u64 stored_blocks_completed,
-                    u64 total_stored_blocks)
+                    u64 total_stored_blocks, WbfsWriteStage stage = WbfsWriteStage::Writing)
 {
   if (callback)
   {
-    callback({completed_bytes, total_bytes, logical_wbfs_block, stored_blocks_completed,
-              total_stored_blocks});
+    callback({.completed_bytes = completed_bytes,
+              .total_bytes = total_bytes,
+              .logical_wbfs_block = logical_wbfs_block,
+              .stored_blocks_completed = stored_blocks_completed,
+              .total_stored_blocks = total_stored_blocks,
+              .stage = stage});
   }
 }
 
@@ -318,6 +322,7 @@ bool ReadLogicalBytes(const std::vector<std::string>& paths, u64 split_size, u64
 enum class ValidationResult
 {
   Success,
+  Cancelled,
   SourceReadFailed,
   StructuralFailure,
 };
@@ -325,8 +330,11 @@ enum class ValidationResult
 ValidationResult ValidateTemporaryWbfs(BlobReader& source, const WbfsAnalysis& analysis,
                                        const TemporaryOutputSet& output,
                                        const WbfsOutputPlan& final_plan,
-                                       const WbfsWriterDetails::WbfsWriterTestHooks* hooks)
+                                       const WbfsWriterDetails::WbfsWriterTestHooks* hooks,
+                                       const WbfsCancellationCallback& cancellation_callback)
 {
+  if (IsCancelled(cancellation_callback))
+    return ValidationResult::Cancelled;
   if (hooks && hooks->fail_validation)
     return ValidationResult::StructuralFailure;
 
@@ -336,6 +344,8 @@ ValidationResult ValidateTemporaryWbfs(BlobReader& source, const WbfsAnalysis& a
   u64 physical_size = 0;
   for (size_t i = 0; i < output.paths.size(); ++i)
   {
+    if (IsCancelled(cancellation_callback))
+      return ValidationResult::Cancelled;
     File::DirectIOFile file(output.paths[i], File::AccessMode::Read);
     if (!file.IsOpen() || file.GetSize() != final_plan.parts[i].size)
       return ValidationResult::StructuralFailure;
@@ -346,6 +356,8 @@ ValidationResult ValidateTemporaryWbfs(BlobReader& source, const WbfsAnalysis& a
 
   for (size_t i = output.paths.size(); i < WBFS_MAX_PARTS; ++i)
   {
+    if (IsCancelled(cancellation_callback))
+      return ValidationResult::Cancelled;
     if (File::Exists(GetPartPath(output.paths[0], i)))
       return ValidationResult::StructuralFailure;
   }
@@ -380,6 +392,8 @@ ValidationResult ValidateTemporaryWbfs(BlobReader& source, const WbfsAnalysis& a
   u64 stored_block = 0;
   for (size_t i = 0; i < analysis.GetUsedWbfsBlocks().size(); ++i)
   {
+    if (IsCancelled(cancellation_callback))
+      return ValidationResult::Cancelled;
     const u16 wlba = Common::swap16(wlba_table[i]);
     if (analysis.GetUsedWbfsBlocks()[i])
     {
@@ -416,6 +430,8 @@ ValidationResult ValidateTemporaryWbfs(BlobReader& source, const WbfsAnalysis& a
   std::array<u8, VALIDATION_SAMPLE_SIZE> wbfs_sample;
   for (size_t i = 0; i < analysis.GetUsedWbfsBlocks().size(); ++i)
   {
+    if (IsCancelled(cancellation_callback))
+      return ValidationResult::Cancelled;
     if (!analysis.GetUsedWbfsBlocks()[i])
       continue;
 
@@ -693,6 +709,8 @@ WbfsWriteResult WriteWbfsImpl(
 
   ReportProgress(progress_callback, total_bytes, total_bytes, last_logical_block, stored_block,
                  total_stored_blocks);
+  ReportProgress(progress_callback, total_bytes, total_bytes, last_logical_block, stored_block,
+                 total_stored_blocks, WbfsWriteStage::Validating);
   const OutputOperationResult close_result =
       SetPartSizesAndClose(&output, final_plan, cancellation_callback);
   if (close_result == OutputOperationResult::Cancelled)
@@ -703,12 +721,16 @@ WbfsWriteResult WriteWbfsImpl(
   if (IsCancelled(cancellation_callback))
     return {WbfsWriteStatus::Cancelled};
   const ValidationResult validation =
-      ValidateTemporaryWbfs(source, analysis, output, final_plan, hooks);
+      ValidateTemporaryWbfs(source, analysis, output, final_plan, hooks, cancellation_callback);
+  if (validation == ValidationResult::Cancelled)
+    return {WbfsWriteStatus::Cancelled};
   if (validation == ValidationResult::SourceReadFailed)
     return {WbfsWriteStatus::SourceReadFailed};
   if (validation != ValidationResult::Success)
     return {WbfsWriteStatus::StructuralValidationFailed};
 
+  ReportProgress(progress_callback, total_bytes, total_bytes, last_logical_block, stored_block,
+                 total_stored_blocks, WbfsWriteStage::Publishing);
   if (IsCancelled(cancellation_callback))
     return {WbfsWriteStatus::Cancelled};
   if (hooks && hooks->before_publication)

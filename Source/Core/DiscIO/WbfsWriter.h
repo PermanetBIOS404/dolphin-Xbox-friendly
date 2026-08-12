@@ -149,6 +149,13 @@ struct WbfsOutputPlan final
 WbfsOutputPlan PlanWbfsOutput(const std::string& primary_path, u64 logical_size,
                               WbfsOutputPolicy output_policy);
 
+enum class WbfsWriteStage
+{
+  Writing,
+  Validating,
+  Publishing,
+};
+
 struct WbfsWriteProgress final
 {
   u64 completed_bytes = 0;
@@ -156,6 +163,7 @@ struct WbfsWriteProgress final
   u64 logical_wbfs_block = 0;
   u64 stored_blocks_completed = 0;
   u64 total_stored_blocks = 0;
+  WbfsWriteStage stage = WbfsWriteStage::Writing;
 };
 
 using WbfsProgressCallback = std::function<void(const WbfsWriteProgress&)>;

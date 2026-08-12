@@ -475,6 +475,9 @@ TEST_F(WbfsWriterTest, WritesConventionalSingleFileAndReopensIt)
   EXPECT_EQ(progress.front().completed_bytes, 0);
   EXPECT_EQ(progress.back().completed_bytes, analysis.GetExpectedOutputSize());
   EXPECT_EQ(progress.back().stored_blocks_completed, analysis.GetUsedWbfsBlockCount());
+  EXPECT_EQ(progress.front().stage, WbfsWriteStage::Writing);
+  EXPECT_EQ(progress[progress.size() - 2].stage, WbfsWriteStage::Validating);
+  EXPECT_EQ(progress.back().stage, WbfsWriteStage::Publishing);
   for (size_t i = 0; i < progress.size(); ++i)
   {
     EXPECT_EQ(progress[i].total_bytes, analysis.GetExpectedOutputSize());
@@ -507,6 +510,32 @@ TEST_F(WbfsWriterTest, CancellationBeforeStartAndDuringWriteLeavesNoOutput)
             WbfsWriteStatus::Cancelled);
   EXPECT_FALSE(File::Exists(m_destination));
   EXPECT_TRUE(FindTemporarySiblings(m_destination).empty());
+}
+
+TEST_F(WbfsWriterTest, CancellationDuringValidationOrPublicationLeavesNoOutput)
+{
+  const auto state = MakeWiiState();
+  const auto source = MakeWiiReader(state);
+  const WbfsAnalysis analysis = Analyze(*source);
+  ASSERT_TRUE(analysis.IsSuccessful());
+
+  for (const WbfsWriteStage cancellation_stage :
+       {WbfsWriteStage::Validating, WbfsWriteStage::Publishing})
+  {
+    bool cancellation_requested = false;
+    const WbfsWriteResult result = WriteWbfs(
+        *source, analysis, m_destination,
+        [&](const WbfsWriteProgress& progress) {
+          if (progress.stage == cancellation_stage)
+            cancellation_requested = true;
+        },
+        [&] { return cancellation_requested; });
+
+    EXPECT_TRUE(cancellation_requested);
+    EXPECT_EQ(result.status, WbfsWriteStatus::Cancelled);
+    EXPECT_FALSE(File::Exists(m_destination));
+    EXPECT_TRUE(FindTemporarySiblings(m_destination).empty());
+  }
 }
 
 TEST_F(WbfsWriterTest, ReadAndValidationFailuresCleanTemporaryOutput)
@@ -827,6 +856,8 @@ TEST_F(WbfsWriterTest, SplitProgressUsesOneConstantLogicalTotalAcrossPartBoundar
   EXPECT_EQ(progress.front().completed_bytes, 0);
   EXPECT_EQ(progress.back().completed_bytes, analysis.GetExpectedOutputSize());
   EXPECT_EQ(progress.back().stored_blocks_completed, analysis.GetUsedWbfsBlockCount());
+  EXPECT_EQ(progress[progress.size() - 2].stage, WbfsWriteStage::Validating);
+  EXPECT_EQ(progress.back().stage, WbfsWriteStage::Publishing);
   for (size_t i = 0; i < progress.size(); ++i)
   {
     EXPECT_EQ(progress[i].total_bytes, analysis.GetExpectedOutputSize());
@@ -929,8 +960,13 @@ TEST_F(WbfsWriterTest, SplitValidationFailureCleansEveryPart)
 
   WbfsWriterDetails::WbfsWriterTestHooks hooks;
   hooks.fail_validation = true;
-  EXPECT_EQ(WriteSplit(*source, analysis, hooks).status,
+  std::vector<WbfsWriteProgress> progress;
+  EXPECT_EQ(WriteSplit(*source, analysis, hooks,
+                       [&](const WbfsWriteProgress& update) { progress.emplace_back(update); })
+                .status,
             WbfsWriteStatus::StructuralValidationFailed);
+  ASSERT_FALSE(progress.empty());
+  EXPECT_EQ(progress.back().stage, WbfsWriteStage::Validating);
   EXPECT_TRUE(FindTemporarySiblings(m_destination).empty());
   for (size_t i = 0; i < 4; ++i)
     EXPECT_FALSE(File::Exists(GetPartPathForTest(m_destination, i)));
@@ -945,8 +981,13 @@ TEST_F(WbfsWriterTest, SplitFinalizationFailureRollsBackPublishedParts)
 
   WbfsWriterDetails::WbfsWriterTestHooks hooks;
   hooks.fail_finalization = 1;
-  EXPECT_EQ(WriteSplit(*source, analysis, hooks).status,
+  std::vector<WbfsWriteProgress> progress;
+  EXPECT_EQ(WriteSplit(*source, analysis, hooks,
+                       [&](const WbfsWriteProgress& update) { progress.emplace_back(update); })
+                .status,
             WbfsWriteStatus::FinalizationFailed);
+  ASSERT_FALSE(progress.empty());
+  EXPECT_EQ(progress.back().stage, WbfsWriteStage::Publishing);
   EXPECT_TRUE(FindTemporarySiblings(m_destination).empty());
   for (size_t i = 0; i < 4; ++i)
     EXPECT_FALSE(File::Exists(GetPartPathForTest(m_destination, i)));

@@ -447,10 +447,9 @@ TEST(WiiExportExecution, ValidMonotonicProgressIsForwarded)
   FakeWiiExportBackend backend(descriptor);
   backend.result = MakeSuccessfulBackendResult(plan);
   backend.progress_events = {
-      MakeProgress(plan, WiiExportExecutionStage::Preparing, 0),
       MakeProgress(plan, WiiExportExecutionStage::Exporting, SMALL_OUTPUT_SIZE / 2),
-      MakeProgress(plan, WiiExportExecutionStage::Finalizing, SMALL_OUTPUT_SIZE),
       MakeProgress(plan, WiiExportExecutionStage::Verifying, SMALL_OUTPUT_SIZE),
+      MakeProgress(plan, WiiExportExecutionStage::Finalizing, SMALL_OUTPUT_SIZE),
   };
   std::vector<WiiExportProgress> received;
 
@@ -459,7 +458,10 @@ TEST(WiiExportExecution, ValidMonotonicProgressIsForwarded)
       [&](const WiiExportProgress& progress) { received.emplace_back(progress); });
 
   EXPECT_EQ(WiiExportExecutionOutcome::Succeeded, result.outcome);
-  EXPECT_EQ(backend.progress_events.size(), received.size());
+  ASSERT_EQ(backend.progress_events.size() + 2, received.size());
+  EXPECT_EQ(WiiExportExecutionStage::Preparing, received.front().stage);
+  EXPECT_EQ(WiiExportExecutionStage::Completed, received.back().stage);
+  EXPECT_EQ(SMALL_OUTPUT_SIZE, received.back().completed_output_bytes);
 }
 
 TEST(WiiExportExecution, CompletedBytesAboveTotalCauseContractViolation)
@@ -726,9 +728,11 @@ TEST(WiiExportExecution, CallerReceivesOnlyValidatedProgress)
       [&](const WiiExportProgress& progress) { received.emplace_back(progress); });
 
   EXPECT_EQ(WiiExportExecutionOutcome::ContractViolation, result.outcome);
-  ASSERT_EQ(2u, received.size());
+  ASSERT_EQ(3u, received.size());
   EXPECT_EQ(0u, received[0].completed_output_bytes);
-  EXPECT_EQ(200u, received[1].completed_output_bytes);
+  EXPECT_EQ(0u, received[1].completed_output_bytes);
+  EXPECT_EQ(200u, received[2].completed_output_bytes);
+  EXPECT_NE(WiiExportExecutionStage::Completed, received.back().stage);
 }
 
 TEST(WiiExportExecution, CancellationQueriedDuringFakeExecutionCanStopIt)
@@ -747,6 +751,28 @@ TEST(WiiExportExecution, CancellationQueriedDuringFakeExecutionCanStopIt)
   EXPECT_EQ(WiiExportExecutionReason::BackendReportedCancellation, result.reason);
   EXPECT_EQ(1, backend.invocation_count);
   EXPECT_EQ(2, cancellation_queries);
+}
+
+TEST(WiiExportExecution, CompletionIsNotEmittedBeforeSuccessfulOutputValidation)
+{
+  const WiiExportPlan plan = MakePlan();
+  const WiiExportBackendDescriptor descriptor = MakeCompatibleDescriptor(plan);
+  const WiiExportExecutionRequest request(plan, descriptor);
+  FakeWiiExportBackend backend(descriptor);
+  backend.result = MakeSuccessfulBackendResult(plan);
+  backend.result.final_output_bytes--;
+  std::vector<WiiExportProgress> received;
+
+  const WiiExportExecutionResult result = UICommon::ExecuteWiiExport(
+      request, backend,
+      [&](const WiiExportProgress& progress) { received.emplace_back(progress); });
+
+  EXPECT_EQ(WiiExportExecutionOutcome::ContractViolation, result.outcome);
+  ASSERT_FALSE(received.empty());
+  EXPECT_EQ(WiiExportExecutionStage::Preparing, received.front().stage);
+  EXPECT_TRUE(std::ranges::none_of(received, [](const WiiExportProgress& progress) {
+    return progress.stage == WiiExportExecutionStage::Completed;
+  }));
 }
 
 TEST(WiiExportExecution, DiagnosticTextIsCarriedUnchangedAsInertData)

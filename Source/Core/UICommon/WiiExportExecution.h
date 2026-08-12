@@ -88,8 +88,9 @@ enum class WiiExportExecutionStage
 {
   Preparing,
   Exporting,
-  Finalizing,
   Verifying,
+  Finalizing,
+  Completed,
 };
 
 struct WiiExportProgress

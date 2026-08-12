@@ -281,6 +281,20 @@ DiscIO::WbfsOutputPolicy WiiExportNativeBackendDetails::GetOutputPolicy(
 WiiExportProgress WiiExportNativeBackendDetails::MapProgress(
     const WiiExportPlan& plan, const DiscIO::WbfsWriteProgress& progress)
 {
+  WiiExportExecutionStage stage = WiiExportExecutionStage::Exporting;
+  switch (progress.stage)
+  {
+  case DiscIO::WbfsWriteStage::Writing:
+    stage = WiiExportExecutionStage::Exporting;
+    break;
+  case DiscIO::WbfsWriteStage::Validating:
+    stage = WiiExportExecutionStage::Verifying;
+    break;
+  case DiscIO::WbfsWriteStage::Publishing:
+    stage = WiiExportExecutionStage::Finalizing;
+    break;
+  }
+
   u64 part_index = plan.parts.empty() ? 0 : plan.parts.size() - 1;
   if (!plan.parts.empty() && progress.completed_bytes < plan.total_planned_output_bytes)
   {
@@ -302,7 +316,7 @@ WiiExportProgress WiiExportNativeBackendDetails::MapProgress(
   }
 
   return {
-      .stage = WiiExportExecutionStage::Exporting,
+      .stage = stage,
       .completed_output_bytes = progress.completed_bytes,
       .total_output_bytes = plan.total_planned_output_bytes,
       .current_part_index = part_index,

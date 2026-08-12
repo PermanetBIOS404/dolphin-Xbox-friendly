@@ -8,6 +8,7 @@
 #include <QStackedWidget>
 
 #include "DolphinQt/GameList/GameListModel.h"
+#include "DolphinQt/GameList/WiiExportProgressDialog.h"
 
 class QAbstractItemView;
 class QLabel;
@@ -117,6 +118,7 @@ private:
   QTableView* m_list;
   QLabel* m_empty;
   bool m_prefer_list;
+  DolphinQt::WiiExportJobControl m_wii_export_job_control;
 
 protected:
   void keyPressEvent(QKeyEvent* event) override;

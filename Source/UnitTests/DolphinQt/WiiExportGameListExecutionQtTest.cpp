@@ -15,7 +15,10 @@
 
 #include <QApplication>
 #include <QByteArray>
+#include <QCloseEvent>
 #include <QDir>
+#include <QLabel>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QTemporaryDir>
 
@@ -27,6 +30,7 @@
 #include "DiscIO/Volume.h"
 #include "DiscIO/VolumeDisc.h"
 #include "DolphinQt/GameList/WiiExportGameListExecution.h"
+#include "DolphinQt/GameList/WiiExportProgressDialog.h"
 #include "DolphinQt/WiiExportPreviewDialog.h"
 #include "UICommon/WiiExportNativeBackend.h"
 #include "UICommon/WiiExportPreview.h"
@@ -489,9 +493,11 @@ TEST(WiiExportGameListExecutionQtTest, ValidatedProgressPropagatesToCaller)
       },
       {}, MakeServices(state));
   ASSERT_TRUE(result.execution);
-  ASSERT_EQ(progress_events.size(), 1);
-  EXPECT_EQ(progress_events[0].stage, UICommon::WiiExportExecutionStage::Exporting);
-  EXPECT_GT(progress_events[0].completed_output_bytes, 0);
+  ASSERT_EQ(progress_events.size(), 3);
+  EXPECT_EQ(progress_events[0].stage, UICommon::WiiExportExecutionStage::Preparing);
+  EXPECT_EQ(progress_events[1].stage, UICommon::WiiExportExecutionStage::Exporting);
+  EXPECT_GT(progress_events[1].completed_output_bytes, 0);
+  EXPECT_EQ(progress_events[2].stage, UICommon::WiiExportExecutionStage::Completed);
 }
 
 TEST(WiiExportGameListExecutionQtTest, ControllerRunsOffCallingThreadWhenDispatchedByUi)
@@ -512,13 +518,21 @@ TEST(WiiExportGameListExecutionQtTest, CooperativeCancellationReturnsCancelled)
   const auto state = std::make_shared<BackendState>();
   state->query_cancellation = true;
   int cancellation_queries = 0;
+  std::vector<UICommon::WiiExportProgress> progress_events;
   const auto result = DolphinQt::RunWiiExportGameListExecution(
-      MakeRequest(), {}, [&cancellation_queries] { return ++cancellation_queries > 2; },
+      MakeRequest(),
+      [&](const UICommon::WiiExportProgress& progress) {
+        progress_events.emplace_back(progress);
+      },
+      [&cancellation_queries] { return ++cancellation_queries > 2; },
       MakeServices(state));
   ASSERT_TRUE(result.execution);
   EXPECT_TRUE(result.execution_invoked);
   EXPECT_EQ(state->invocation_count, 1);
   EXPECT_EQ(result.execution->outcome, UICommon::WiiExportExecutionOutcome::Cancelled);
+  EXPECT_TRUE(std::ranges::none_of(progress_events, [](const UICommon::WiiExportProgress& progress) {
+    return progress.stage == UICommon::WiiExportExecutionStage::Completed;
+  }));
 }
 
 TEST(WiiExportGameListExecutionQtTest, CancellationAfterRevalidationSkipsBackend)
@@ -613,5 +627,145 @@ TEST(WiiExportGameListExecutionQtTest, ClosingPreviewWithoutExportCreatesNothing
   dialog.reject();
   EXPECT_EQ(dialog.result(), QDialog::Rejected);
   EXPECT_EQ(QDir(destination.path()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot), before);
+}
+
+TEST(WiiExportProgressPresentationQtTest, StartsIndeterminateAndWritingUsesRealByteProgress)
+{
+  const auto preparing = DolphinQt::MakeWiiExportProgressPresentation({
+      .stage = UICommon::WiiExportExecutionStage::Preparing,
+      .total_output_bytes = 100,
+      .total_part_count = 1,
+  });
+  EXPECT_FALSE(preparing.determinate);
+  EXPECT_FALSE(preparing.complete);
+  EXPECT_TRUE(preparing.status_text.contains(QStringLiteral("Preparing")));
+
+  const auto writing = DolphinQt::MakeWiiExportProgressPresentation({
+      .stage = UICommon::WiiExportExecutionStage::Exporting,
+      .completed_output_bytes = 25,
+      .total_output_bytes = 100,
+      .total_part_count = 1,
+  });
+  EXPECT_TRUE(writing.determinate);
+  EXPECT_EQ(writing.value, DolphinQt::WII_EXPORT_PROGRESS_MAXIMUM / 4);
+  EXPECT_FALSE(writing.complete);
+  EXPECT_TRUE(writing.status_text.contains(QStringLiteral("Writing")));
+}
+
+TEST(WiiExportProgressPresentationQtTest, FullByteCountIsNotPrematureCompletion)
+{
+  const auto writing = DolphinQt::MakeWiiExportProgressPresentation({
+      .stage = UICommon::WiiExportExecutionStage::Exporting,
+      .completed_output_bytes = 100,
+      .total_output_bytes = 100,
+      .total_part_count = 1,
+  });
+  EXPECT_EQ(writing.value, DolphinQt::WII_EXPORT_PROGRESS_MAXIMUM - 1);
+  EXPECT_FALSE(writing.complete);
+}
+
+TEST(WiiExportProgressPresentationQtTest, ValidationAndFinalizationAreVisibleRealStages)
+{
+  const auto validation = DolphinQt::MakeWiiExportProgressPresentation({
+      .stage = UICommon::WiiExportExecutionStage::Verifying,
+      .completed_output_bytes = 100,
+      .total_output_bytes = 100,
+      .total_part_count = 1,
+  });
+  const auto finalization = DolphinQt::MakeWiiExportProgressPresentation({
+      .stage = UICommon::WiiExportExecutionStage::Finalizing,
+      .completed_output_bytes = 100,
+      .total_output_bytes = 100,
+      .total_part_count = 1,
+  });
+
+  EXPECT_FALSE(validation.determinate);
+  EXPECT_TRUE(validation.status_text.contains(QStringLiteral("Validating")));
+  EXPECT_FALSE(finalization.determinate);
+  EXPECT_TRUE(finalization.status_text.contains(QStringLiteral("Finalizing")));
+}
+
+TEST(WiiExportProgressPresentationQtTest, OnlyAuthoritativeCompletionReachesOneHundredPercent)
+{
+  const auto completed = DolphinQt::MakeWiiExportProgressPresentation({
+      .stage = UICommon::WiiExportExecutionStage::Completed,
+      .completed_output_bytes = 100,
+      .total_output_bytes = 100,
+      .total_part_count = 1,
+  });
+  EXPECT_TRUE(completed.determinate);
+  EXPECT_TRUE(completed.complete);
+  EXPECT_EQ(completed.value, DolphinQt::WII_EXPORT_PROGRESS_MAXIMUM);
+}
+
+TEST(WiiExportJobControlQtTest, DuplicateStartAndRepeatedCancelAreHarmless)
+{
+  DolphinQt::WiiExportJobControl control;
+  EXPECT_TRUE(control.TryStart());
+  EXPECT_FALSE(control.TryStart());
+  EXPECT_TRUE(control.RequestCancellation());
+  EXPECT_FALSE(control.RequestCancellation());
+  EXPECT_TRUE(control.IsCancellationRequested());
+  control.Finish();
+  EXPECT_FALSE(control.IsRunning());
+  EXPECT_FALSE(control.RequestCancellation());
+
+  EXPECT_TRUE(control.TryStart());
+  EXPECT_FALSE(control.IsCancellationRequested());
+  control.Finish();
+}
+
+TEST(WiiExportProgressDialogQtTest, CancelAndCloseCannotOrphanActiveExecution)
+{
+  GetTestApplication();
+  DolphinQt::WiiExportJobControl control;
+  ASSERT_TRUE(control.TryStart());
+  DolphinQt::WiiExportProgressDialog dialog(QStringLiteral("Synthetic Game"),
+                                            QStringLiteral("/tmp/synthetic.wbfs"), &control);
+  dialog.show();
+  QApplication::processEvents();
+  ASSERT_TRUE(dialog.isVisible());
+
+  EXPECT_FALSE(dialog.close());
+  EXPECT_TRUE(dialog.isVisible());
+  EXPECT_TRUE(control.IsCancellationRequested());
+  auto* const cancel_button =
+      dialog.findChild<QPushButton*>(QStringLiteral("wiiExportCancelButton"));
+  ASSERT_NE(cancel_button, nullptr);
+  EXPECT_FALSE(cancel_button->isEnabled());
+
+  dialog.reject();
+  EXPECT_TRUE(dialog.isVisible());
+  control.Finish();
+  dialog.ExecutionFinished();
+  QApplication::processEvents();
+  EXPECT_FALSE(dialog.isVisible());
+  EXPECT_EQ(dialog.result(), QDialog::Accepted);
+}
+
+TEST(WiiExportProgressDialogQtTest, CancellationStatusSurvivesLateWorkerProgress)
+{
+  GetTestApplication();
+  DolphinQt::WiiExportJobControl control;
+  ASSERT_TRUE(control.TryStart());
+  DolphinQt::WiiExportProgressDialog dialog(QStringLiteral("Synthetic Game"),
+                                            QStringLiteral("/tmp/synthetic.wbfs"), &control);
+  dialog.RequestCancellation();
+  dialog.UpdateProgress({
+      .stage = UICommon::WiiExportExecutionStage::Finalizing,
+      .completed_output_bytes = 100,
+      .total_output_bytes = 100,
+      .total_part_count = 1,
+  });
+  auto* const status =
+      dialog.findChild<QLabel*>(QStringLiteral("wiiExportProgressStatus"));
+  auto* const progress =
+      dialog.findChild<QProgressBar*>(QStringLiteral("wiiExportProgressBar"));
+  ASSERT_NE(status, nullptr);
+  ASSERT_NE(progress, nullptr);
+  EXPECT_TRUE(status->text().contains(QStringLiteral("Cancellation requested")));
+  EXPECT_EQ(progress->minimum(), 0);
+  EXPECT_EQ(progress->maximum(), 0);
+  control.Finish();
 }
 }  // namespace

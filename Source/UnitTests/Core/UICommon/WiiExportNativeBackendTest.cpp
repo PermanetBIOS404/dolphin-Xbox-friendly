@@ -404,6 +404,27 @@ TEST(WiiExportNativeBackendMappingTest, SplitProgressUsesCorrectIndexesAtExactBo
   EXPECT_EQ(map(150).stage, WiiExportExecutionStage::Exporting);
 }
 
+TEST(WiiExportNativeBackendMappingTest, WriterLifecycleStagesMapToExecutionStages)
+{
+  WiiExportPlan plan;
+  plan.parts = {{"game.wbfs", 150}};
+  plan.total_part_count = 1;
+  plan.total_planned_output_bytes = 150;
+
+  const auto map_stage = [&](DiscIO::WbfsWriteStage stage) {
+    return WiiExportNativeBackendDetails::MapProgress(
+               plan, {.completed_bytes = 150, .total_bytes = 150, .stage = stage})
+        .stage;
+  };
+
+  EXPECT_EQ(map_stage(DiscIO::WbfsWriteStage::Writing),
+            WiiExportExecutionStage::Exporting);
+  EXPECT_EQ(map_stage(DiscIO::WbfsWriteStage::Validating),
+            WiiExportExecutionStage::Verifying);
+  EXPECT_EQ(map_stage(DiscIO::WbfsWriteStage::Publishing),
+            WiiExportExecutionStage::Finalizing);
+}
+
 TEST_F(WiiExportNativeBackendTest, MilestoneBRejectsInjectedInvalidMappedProgress)
 {
   PreparedSource plan_source = PrepareSource();
