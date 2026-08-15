@@ -1,0 +1,791 @@
+# Wii Export NKit Reconstruction Architecture
+
+Status: N1 research/design only. NKit export remains blocked. This document is based on
+`feature/wii-export-assistant` at
+`2fcc8ed5527dad77326a42af763f25eb76b23979` and was prepared without opening a real NKit image.
+
+## Decision summary
+
+The first supported source should be a retail **Wii NKit v1 logical stream**, identified by the
+exact eight bytes `NKIT v01` at disc offset `0x200`. The canonical outer files are `.nkit.iso`
+(`BlobType::PLAIN`) and `.nkit.gcz` (`BlobType::GCZ`), but the NKit representation is inside the
+outer container and is not itself a `BlobType`.
+
+The reconstruction layer must produce the byte-addressed view of a conventional raw Wii disc,
+not merely a decrypted file-system view. `DiscIO::WriteWbfs` copies selected raw 2 MiB ranges from
+a `BlobReader`. `DiscScrubber` uses a `VolumeWii` to decide which ranges are needed, but the writer
+still copies the original reader's raw bytes. The reconstructed view therefore needs conventional
+disc/partition headers, original logical offsets, `0x8000` partition clusters with their `0x400`
+hash areas, valid H0/H1/H2/H3 relationships, and Wii partition encryption.
+
+The recommended sequence is:
+
+1. **N2:** implement and test the Wii NKit v1 metadata, validation, recovery assessment,
+   deterministic-junk, and gap-decoding foundation. It must remain disconnected from export/UI.
+2. **N3 proof:** use that same reconstruction core to stream a temporary conventional ISO, reopen
+   and validate it with `DiscIO`, then prove that `AnalyzeWbfs` accepts it. This is the safest first
+   end-to-end proof, not the desired shipping design.
+3. **Final architecture:** index the NKit stream once and expose an on-demand
+   `NKitV1ReconstructedBlobReader`. Feed a copy of that reader to `VolumeWii`/`AnalyzeWbfs` and the
+   same immutable plan to the existing native WBFS backend. Keep `WriteWbfs` unchanged.
+
+A direct NKit-to-WBFS implementation is rejected because it would couple reconstruction to WBFS,
+duplicate conventional-disc analysis, and weaken the existing validation boundary.
+
+## 1. Current Dolphin NKit handling
+
+### Detection and opening
+
+The current path is:
+
+```text
+path
+  -> DiscIO::CreateBlobReader (DiscIO/Blob.cpp)
+  -> outer container BlobReader
+  -> DiscIO::CreateDisc / TryCreateDisc (DiscIO/Volume.cpp)
+  -> Wii magic at 0x18
+  -> DiscIO::VolumeWii
+  -> VolumeDisc::IsNKit (DiscIO/VolumeDisc.cpp)
+  -> big-endian "NKIT" at logical disc offset 0x200
+```
+
+`BlobType` describes the outer storage container (`PLAIN`, `GCZ`, `WIA`, `RVZ`, and so on). There
+is no `BlobType::NKIT`. `VolumeDisc::IsNKit()` reads four bytes from the already-decoded outer
+container. This means the same inner NKit stream can be wrapped by different container formats.
+
+`UICommon::GameFile` records `volume->IsNKit()` and can display the game as NKit. The Game List can
+identify it as a Wii game because `TryCreateDisc` sees the normal Wii magic before NKit detection.
+
+### What Dolphin can read today
+
+Wii NKit v1 changes bytes `0x60` and `0x61` in the disc header to indicate that partition data has
+neither Wii hash areas nor encryption. `VolumeWii` reads those flags in its constructor. With both
+features absent, `VolumeWii::Read` reads the partition's compacted decrypted byte stream directly.
+Consequently current Dolphin can usually:
+
+* identify the Wii title and ID;
+* display metadata and the NKit label;
+* enumerate the partitions still represented in the NKit partition table;
+* read the NKit-adjusted FST and files;
+* boot many NKit images through the ordinary Wii volume implementation.
+
+It cannot read the conventional raw sectors that were replaced by the NKit encoding. Raw
+`BlobReader::Read` returns the compacted NKit stream, not a restored Wii ISO. Partition offsets and
+file offsets observed through `VolumeWii` are the NKit-adjusted values.
+
+The launch path intentionally displays `DolphinQt/NKitWarningDialog.cpp`. The warning notes slower
+loading, deterministic-state incompatibilities, and known game failures. `DolphinTool` and the Qt
+conversion dialog also state that converting an NKit input with Dolphin leaves the result as NKit.
+Those conversion paths only change the outer container.
+
+### NKit-specific behavior present in Dolphin
+
+Current source contains only these NKit-aware behaviors:
+
+* four-byte detection in `VolumeDisc::IsNKit()`;
+* UI/Game List labeling and launch/conversion warnings;
+* verifier diagnostics in `VolumeVerifier::CheckMisc()`;
+* extraction cleanup in `DiscExtractor.cpp`, which clears the NKit header area from extracted
+  `header.bin` and restores the Wii hash/encryption flag bytes in an extracted disc header;
+* explicit Wii Export rejection.
+
+There is no NKit metadata parser, gap decoder, junk regenerator, partition reconstructor, or
+reconstructed random-access reader in current or historical Dolphin source. Repository history
+locates NKit detection at commit `2e8c5b4521d7a483d9895cd4294acd51636046d4` and extraction cleanup
+at `ee19ff66b4284c4849a4bec446fb5f9077f6c7d6`; `git log -S/-G` found no former reconstruction
+engine.
+
+## 2. Current Wii Export rejection path
+
+### Exact flow
+
+`DolphinQt::MakeWiiExportGameListEntry` accepts a valid Wii Game List item independently of NKit.
+`PrepareWiiExportGameListSource` then:
+
+1. reopens the exact `entry.source_path` with `DiscIO::CreateDisc`;
+2. checks that it is still a Wii disc and that its ID matches the Game List entry;
+3. calls `DiscIO::AnalyzeWbfs(*volume)`;
+4. constructs `WiiExportPreparedSource` only after analysis succeeds.
+
+`AnalyzeWbfs` checks, in order:
+
+1. Wii platform;
+2. allowed outer `BlobType` (`PLAIN` or `RVZ`);
+3. `DataSizeType::Accurate`;
+4. `volume.IsNKit()`;
+5. conventional source size/header/geometry.
+
+The practical results are:
+
+| Source | First analysis result |
+| --- | --- |
+| `.nkit.iso` (`PLAIN`, accurate) | `WbfsAnalysisError::NKitSource` |
+| NKit stream inside RVZ | `WbfsAnalysisError::NKitSource` |
+| canonical `.nkit.gcz` | `WbfsAnalysisError::UnsupportedSourceFormat` before the NKit check |
+| inaccurate outer reader | `WbfsAnalysisError::InaccurateSourceSize` before the NKit check |
+
+If a synthetic prepared source bypasses this first boundary, `CreateWiiExportPlan` sets
+`requires_nkit_input` and requires `WiiExportBackendCapability::NKitInput`. The native descriptor
+does not advertise that capability, preflight blocks it, and
+`WiiExportNativeBackend::Execute()` contains an additional explicit NKit failure. N1 must not
+remove any of these defenses.
+
+### Why the rejection is technically necessary
+
+For a plain NKit file, `BlobReader::GetDataSize()` is accurately the length of the compacted NKit
+stream; it is not the conventional Wii disc length recorded by NKit metadata. Removing only the
+`IsNKit` check would make `AnalyzeWbfs` analyze NKit offsets and make `WriteWbfs` copy NKit bytes
+into WBFS. The result would remain NKit internally and would not be a conventional USB-loader
+disc.
+
+`AnalyzeWbfs` does not require anything fundamentally unavailable after reconstruction. It needs:
+
+* a Wii `VolumeDisc` over a conventional raw view;
+* an accurate conventional data size;
+* a stable, random-readable `BlobReader`;
+* a conventional disc header and partition/file-system structure.
+
+The existing writer can operate unchanged when those conditions are supplied. The outer-container
+restriction is broader than necessary for a future reconstruction front end: a GCZ NKit input can
+be decoded first and exposed as a conventional prepared reader. That is not a reason to widen the
+current direct-write policy.
+
+### Integration requirement exposed by current contracts
+
+Preview analysis currently dies with the temporary `VolumeDisc`; execution later reopens the
+original path with `CreateBlobReader`. A reconstructed source therefore needs an immutable,
+repeatable preparation recipe. Preview and execution must independently rebuild the same
+reconstruction plan and compare an original-source identity before the backend starts.
+
+The original outer `BlobType` and the effective reconstructed representation also need separate
+fields. The effective reader may behave as `PLAIN`, while the UI and revalidation still need to
+remember that the source was, for example, GCZ plus Wii NKit v1.
+
+## 3. NKit variants and forms
+
+### NKit v1 disc representation
+
+The NKit v1 source accepts exactly `NKIT v01`, not merely the four-byte marker Dolphin currently
+tests. For Wii, the top-level header fields used by the reference reader/writer are:
+
+| Offset | Meaning in Wii NKit v1 |
+| --- | --- |
+| `0x200..0x207` | ASCII signature/version `NKIT v01` |
+| `0x208` | big-endian CRC32 of the pre-NKit source image |
+| `0x20c` | CRC-forcing/patch value used by NKit v1 |
+| `0x210` | original Wii image length divided by four |
+| `0x214` | junk-ID/format field used by v1 readers; do not assume semantics without validation |
+| `0x218` | CRC32 of an externally stored removed update partition, or zero if not removed |
+
+Partition data has another `NKIT v01` inner header and an original partition-size field. The NKit
+stream carries encoded gap descriptions, compacted file data, an adjusted FST, hash-preservation
+flags, and exceptional preserved per-cluster hash material.
+
+### Forms relevant to RWiN
+
+| Form | Wii/GC | Preserved/changed data | Reconstructability | N1 decision |
+| --- | --- | --- | --- | --- |
+| Wii NKit v1, update retained | Wii | Data partitions compacted/decrypted; deterministic gaps encoded; update remains | Valid v1 should be reconstructable to its pre-NKit source from internal data | Initial target |
+| Wii NKit v1, update removed (`0x218 != 0`) | Wii | Same, but update partition is externalized and represented by recovery metadata | Playable data partition can be reconstructed internally; archival-original update requires matching recovery data | Initial target with explicit fidelity state |
+| `.nkit.iso` | Wii or GC | Plain outer container around v1 stream | Outer reader is straightforward | Initial Wii container |
+| `.nkit.gcz` | Wii or GC | GCZ outer container around the same v1 stream | Outer GCZ reader supplies the NKit stream | Initial Wii container after reconstruction front end; not direct WBFS input |
+| NKit v1 stream rewrapped as RVZ/WIA | Wii or GC | Same inner representation; Dolphin conversion preserves NKit | Algorithm is the same, but each outer format needs tests and stable random reads | Recognize; defer support claim until tested |
+| GameCube NKit v1 | GameCube | Similar FST compaction/gap encoding, but no Wii partition crypto/hash layer and size metadata differs | Deterministic for valid images, with different recovery rules | Explicitly out of this Wii milestone |
+| NKit v2 lossless WBFS/CISO/WIA metadata | Wii or GC | Normal container plus a separate NKit 2 header, checksums, original size, and junk-block map | Container reader can restore omitted blocks | Different format family; not detected by `VolumeDisc::IsNKit`, out of scope |
+| NKit 2 scan plus deduplicated file store | Multiple | XML map plus external content store | External files are intrinsic | Not a standalone NKit disc input; out of scope |
+
+The current NKit project documents NKit v1 output as `nkit.iso`/`nkit.gcz`, states that v1 compacted
+file systems and predictable junk gaps, and states that NKit 2 reads but no longer writes that
+format. NKit 2 must not be treated as a newer version of the `NKIT v01` byte stream without a
+separate specification and parser.
+
+Initial production support should be narrower than the reference program: retail Wii discs with a
+valid data partition, exact v1 signature, sane single- or dual-layer size, and supported outer
+reader. RVT-R/RVT-H, development/non-retail layouts, custom malformed partitions, unknown versions,
+and already-damaged sources should return typed unsupported/incomplete results.
+
+## 4. What reconstruction requires
+
+### Transformations performed by Wii NKit v1
+
+The NKit v1 reference implementation shows that Wii encoding is not ordinary scrubbing:
+
+* it sets the top-level Wii header to no-hashes/no-encryption;
+* it may extract and remove the update partition, recording its CRC;
+* it writes partition payloads as decrypted `0x7c00` data portions without the normal `0x400`
+  per-cluster hash portions;
+* it compacts files, updates FST file offsets and DOL/FST header offsets, and records gaps;
+* it replaces predictable gaps with typed run descriptions;
+* it can remove an FST-listed file whose content is exactly deterministic junk and record enough
+  information to recreate it;
+* it stores flags plus exceptional hash headers for partition groups whose original hash material
+  cannot be reproduced by the normal rule;
+* it retains/uses original-size and CRC metadata so a reconstructed stream can be checked.
+
+The inverse must parse and validate before trusting any encoded length or offset. At a high level:
+
+```text
+outer BlobReader
+  -> validate Wii magic + exact NKit v1 metadata
+  -> inventory represented partitions and recovery requirements
+  -> decode compacted files and typed gap records
+  -> restore original file/FST/DOL/partition offsets
+  -> regenerate deterministic junk and explicit fill/literal spans
+  -> restore each partition's decrypted payload length
+  -> restore/preserve Wii hash structures for 64-cluster groups
+  -> encrypt 0x7c00 payloads into conventional 0x8000 clusters
+  -> expose a conventional raw Wii disc address space
+```
+
+`VolumeWii::HashGroup` and `VolumeWii::EncryptGroup` already implement conventional H0/H1/H2
+construction and AES encryption and should be reused where their interfaces fit. The NKit hash
+flag/exception stream still needs its own parser, and the reconstructed H3 relationship must be
+validated. Blindly recalculating all hashes is not sufficient for exceptional/custom groups and
+can conflict with the H3 table/TMD content digest.
+
+### Requirement matrix
+
+| Item | Classification | Evidence/consequence |
+| --- | --- | --- |
+| Clear top-level and inner NKit metadata | Required | `NkitReaderWii` clears `0x200..0x21b`; exported conventional view must not remain NKit |
+| Restore Wii hash/encryption flags | Required | NKit writer sets `0x60/0x61` to `1`; conventional raw partitions require both back to `0` |
+| Restore/normalize partition table | Required, variant-dependent | Retained-update form can restore represented entries; removed-update form needs a playable-vs-archival policy |
+| Restore partition and file mappings | Required | NKit compacts files and rewrites FST, DOL, FST, partition offsets, and sizes |
+| Decode typed gap records | Required | Gap records distinguish junk, scrub/fill, literal data, repeats, and junk-file removal |
+| Regenerate deterministic junk | Required for playable correctness | Some FST-listed files can be removed as junk; a game may legally read them, so they cannot simply be omitted |
+| Restore arbitrary non-junk gap bytes | Required when embedded | Mixed gaps carry literal spans that must be copied |
+| Reproduce byte-perfect unused filler | Not required for playable WBFS; required for archival identity | The WBFS scrub map can omit proven-unused regions, but original CRC recovery needs exact bytes |
+| Handle previously scrubbed regions | Required to classify; exact recovery may be impossible | v1 encodes scrub/fill states; an image made from an already lossy source does not magically contain the prior bytes |
+| Restore update partition contents | Not required for game-partition playback; required for archival original when originally present | Removed-update CRC points to an external recovery partition |
+| Restore channel/VC/non-game partitions | Variant-dependent | Normally retained by NKit encoding; an already-stripped source can require external partition files for archival repair |
+| Restore per-cluster hashes | Required | Conventional Wii raw partition clusters contain a `0x400` hash area |
+| Restore H3/TMD consistency | Required | Retained data must pass integrity validation; exceptional groups use preserved hash material |
+| Restore partition encryption | Required | USB loaders and the conventional WBFS path consume raw encrypted Wii disc representation |
+| Restore disc logical size/address space | Required | NKit stream length is not the conventional disc length; `0x210 * 4` supplies the Wii output size |
+| External recovery database/files | Not required for a structurally valid playable subset; variant-dependent for archival exactness | The reference separates NKit expansion from a later recovery pass |
+| Byte-identical Redump CRC/SHA result | Not required for playable export; required for archival-perfect status | This is a distinct product promise and must never be inferred from “boots” |
+
+### Raw versus decrypted offsets
+
+The final reader's address space is the conventional disc/raw space used by `BlobReader::Read`:
+
+* non-partition areas use disc offsets directly;
+* Wii partition payloads occupy `0x8000` raw clusters;
+* each raw cluster contains `0x400` hash bytes plus `0x7c00` encrypted data bytes;
+* `VolumeWii` translates decrypted partition offsets to those raw clusters.
+
+An interface that exposes only the `0x7c00` decrypted stream is useful inside reconstruction but
+cannot be passed directly to `WriteWbfs`.
+
+### Open proof items, not assumptions
+
+The following need synthetic vectors and later controlled real-image proof:
+
+* exact behavior of every hash-preservation flag/exception combination;
+* update-removed dual-layer and unusual partition layouts;
+* retail Korean common-key handling through Dolphin's existing ticket code;
+* NKit produced from custom, corrupt, RVT, or already-lossy inputs;
+* real USB Loader GX behavior for a normalized disc that intentionally omits a missing update
+  partition from the reconstructed partition table;
+* cancellation granularity and cache bounds for an on-demand encrypted group generator.
+
+## 5. External recovery data and fidelity
+
+### Decisive answer
+
+**No: not every Wii NKit image can be reconstructed to a byte-identical original ISO from the file
+alone.** An NKit v1 image may externalize its update partition (`0x218` is the partition CRC), or it
+may have been created from a source that had already lost update/channel/scrubbed data. The
+reference recovery layer consumes standalone update and channel/VC partition files, Redump/custom
+data, region/header candidates, and rare junk patches.
+
+For the deliberately supported playable subset, the conclusion is different: a valid retail Wii
+NKit v1 image with an intact, structurally valid data partition contains or deterministically
+describes the game-partition material needed to build a conventional playable representation. A
+missing update partition is not needed to launch the game. RWiN can retain the current NKit table
+that omits that partition, restore the present partitions to conventional raw form, and report that
+archival recovery is unavailable. This is an implementation inference supported by the reference
+reader's ability to expand without the update file; it still requires N3/N4 structural and real-Wii
+acceptance tests before becoming a support claim.
+
+If game-partition reconstruction or integrity validation fails, RWiN must not publish a WBFS and
+must classify the source as incomplete/unsupported. “NKit” alone is not proof that the input is
+recoverable.
+
+### Reference behavior
+
+The v1 `Converter` uses:
+
+* `ConvertToIso`: `NkitReaderWii` only;
+* `RecoverToIso`: `NkitReaderWii`, then `RecoverReaderWii`.
+
+When the NKit header names a removed update partition and no matching recovery file exists,
+`NkitReaderWii` inserts filler, continues, and reports the result as recoverable rather than
+aborting. `RecoverReaderWii` is the separate archival repair pass that can insert update/channel
+partitions and attempt a known-dump match.
+
+### Required RWiN states
+
+The reconstruction result should keep gameplay and archival status orthogonal:
+
+| State | Meaning | Export action |
+| --- | --- | --- |
+| `PlayableReady` | Conventional data partition reconstructed and validated; no known missing archival data | May proceed after NKit support is deliberately enabled |
+| `PlayableReadyArchivalDataMissing` | Playable data partition validated; update/auxiliary/original filler is unavailable | May proceed with an explicit non-archival notice |
+| `ArchivalExactReady` | Reconstructed bytes verified against embedded/source checksums, with any required recovery data | May proceed; still do not market WBFS as archival |
+| `IncompleteOrInvalid` | Gameplay-critical data, mapping, crypto/hash consistency, or required structure cannot be proven | Block; never create final output |
+| `UnsupportedVariant` | GC NKit, unknown v1 version, NKit 2/dedupe, RVT/custom form outside tested policy | Block with a precise diagnostic |
+
+No automatic recovery-data download belongs in N2 or N3. Recovery data is also potentially
+copyrighted partition content and must be user-supplied under a separate, reviewed policy if
+archival recovery is ever implemented.
+
+## 6. Reference implementations and sources
+
+### Dolphin source/history
+
+The authoritative evidence is the local source named throughout this document, especially:
+
+* `Source/Core/DiscIO/Blob.h`, `Blob.cpp`, `Volume.cpp`, `VolumeDisc.cpp`, `VolumeWii.cpp`;
+* `Source/Core/DiscIO/DiscScrubber.cpp`, `WbfsWriter.cpp`;
+* `Source/Core/DolphinQt/GameList/WiiExportGameListPreview.cpp` and
+  `WiiExportGameListExecution.cpp`;
+* `Source/Core/UICommon/WiiExportPlan.cpp`, `WiiExportNativeBackend.cpp`;
+* `Source/Core/DiscIO/DiscExtractor.cpp`, `VolumeVerifier.cpp`;
+* commits `2e8c5b4521d` and `ee19ff66b4`.
+
+The official Dolphin progress report for May/June 2020 documents that NKit moves files earlier on
+disc, can increase emulated load times, can break games, and differs from lossless RVZ:
+<https://dolphin-emu.org/blog/2020/07/05/dolphin-progress-report-may-and-june-2020/>.
+
+### NKit v1 source
+
+The public v1.4 source inspected was the `Ryan-Myers/NKit` fork of `Nanook/NKitv1`, commit
+`61dd683b4b70273a37c4513726b87943f2e32e37`:
+<https://github.com/Ryan-Myers/NKit/tree/61dd683b4b70273a37c4513726b87943f2e32e37>.
+
+Useful components and their roles:
+
+| Component | Role | RWiN treatment |
+| --- | --- | --- |
+| `Conversion/Readers/NkitReaderWii.cs` | Parses v1 metadata; expands files/gaps; restores sizes, hashes, encryption, and optional update data | Reimplement behavior behind Dolphin interfaces; use as test/oracle evidence |
+| `Conversion/Writers/NkitWriterWii.cs` | Definitive inverse evidence for what v1 removes/rewrites | Use to derive invariants and fixture encoder, not ship writer code |
+| `Conversion/Gaps.cs` | Typed gap/run encoding | Reimplement small format decoder with independent tests |
+| `FilesAndStreams/JunkStream.cs` | Deterministic Wii junk generation | Reimplement and verify with known legal vectors |
+| `Conversion/WiiHashStore.cs` | Flags and exceptional stored hash headers | Reimplement parser; reuse Dolphin hash/AES primitives |
+| `DiscImage/Wii/WiiPartitionGroupEncryptionState.cs` | Hash validation/regeneration and encryption state | Reuse concepts; prefer `VolumeWii::HashGroup/EncryptGroup` |
+| `Conversion/Readers/RecoverReaderWii.cs` and `Settings/RecoveryData.cs` | Separate archival repair using partition files/dat knowledge | Do not include in playable N2/N3 path |
+
+The NKit 2 project/wiki provides useful product-level confirmation that v1 used
+`nkit.iso`/`nkit.gcz`, compacted file systems, and removed predictable junk, and that NKit 2 reads
+but no longer writes v1: <https://github.com/Nanook/NKit/wiki/Home>. Its processing documentation
+also states that NKit ISO/GCZ is expanded to a temporary ISO before conversion:
+<https://github.com/Nanook/NKit/wiki/Processing-Tasks>.
+
+### NKit 2 / nod comparison
+
+`encounter/nod` commit `ac12dba52493328e803a02df947d07f1fd82e168` was inspected only to avoid
+conflating formats: <https://github.com/encounter/nod>. Its NKit 2 header is container metadata for
+lossless WBFS/CISO/WIA, with size/digests and junk bits; it is not the inner `NKIT v01` v1 stream.
+Its buffered reader/writer architecture is a useful concept, not a v1 reconstruction source.
+
+### Licensing
+
+* Dolphin is GPL-2.0-or-later.
+* The inspected NKit v1 source is MIT licensed (copyright Nanook, 2019). MIT code is compatible with
+  a GPL project, but any copied or substantially adapted portion requires retention of the MIT
+  notice. The preferred path is a documented behavioral reimplementation plus independently
+  generated vectors, with explicit attribution in source where an algorithm is adapted.
+* `encounter/nod` is dual MIT/Apache-2.0. It is not needed for v1 and should not be imported merely
+  to gain its NKit 2 container metadata.
+
+Do not copy the C# implementation wholesale. Its forward-only pipeline, exception model, global
+settings/recovery behavior, and concurrency do not match Dolphin's `BlobReader` contracts.
+
+## 7. Architecture comparison
+
+### Architecture A: temporary reconstructed ISO
+
+```text
+NKit -> forward reconstruction -> exclusive temporary ISO
+     -> CreateDisc -> AnalyzeWbfs -> existing writer
+```
+
+Advantages:
+
+* closest to the proven v1 forward reader and easiest to compare against an oracle;
+* normal Dolphin classes validate the exact boundary before WBFS is involved;
+* random reads, source copies, and revalidation become ordinary ISO operations;
+* failures are easy to inspect with synthetic fixtures;
+* best early proof of partition remapping, hashing, and encryption.
+
+Costs/risks:
+
+* requires roughly 4.7 GiB (single layer) or 8.5 GiB (dual layer) of temporary space in addition to
+  WBFS staging/final space;
+* writes every reconstructed byte even when WBFS will omit most unused blocks;
+* adds a full extra sequential I/O pass;
+* cancellation and crash cleanup must cover an exclusive temporary file;
+* preview cannot cheaply call conventional `AnalyzeWbfs` unless reconstruction happens before the
+  user chooses Export;
+* poor final UX on space-constrained destinations.
+
+Requirements for the N3 proof: create with no-replace semantics under a disposable test root,
+check cancellation between bounded chunks/groups, use `ScopeGuard` cleanup, flush/close before
+reopening, validate `!IsNKit()`, `HasWiiHashes()`, `HasWiiEncryption()`, partition/FST reads, and
+`AnalyzeWbfs`, then delete the temporary ISO. Never publish it as a user output.
+
+Assessment: **recommended N3 proof architecture; not recommended final architecture**.
+
+### Architecture B: on-demand reconstructed DiscIO reader
+
+```text
+outer NKit BlobReader
+  -> immutable parsed/indexed NKitV1ReconstructionPlan
+  -> NKitV1ReconstructedBlobReader
+  -> VolumeWii / AnalyzeWbfs / WriteWbfs
+```
+
+The reader must implement:
+
+* `GetDataSize()` as the conventional size from validated NKit metadata;
+* `GetDataSizeType()` as `Accurate` only after a complete valid plan is built;
+* a prepared/effective conventional type (normally `PLAIN`), while retaining the original outer
+  type separately for UI/revalidation;
+* `GetRawSize()` consistently for source matching (prefer the virtual conventional size, with an
+  independent original-source fingerprint outside `WbfsAnalysis`);
+* `CopyReader()` with an independent outer reader and caches but the same immutable plan;
+* arbitrary, overflow-safe `Read(offset, size)` across copied, generated, hashed, encrypted, and
+  zero/fill spans.
+
+The forward v1 encoding first needs a bounded scan that validates every encoded record and builds
+an output-to-input span/group index. Partition groups align naturally with the 2 MiB raw group size
+(`64 * 0x8000`), also the current WBFS block size. Cache one or a small bounded number of fully
+reconstructed/encrypted groups. Reads spanning regions stitch header/filler/group data. The reader
+itself remains non-thread-safe, like `BlobReader`; `CopyReader` provides parallel independence.
+
+Cancellation does not belong in `BlobReader::Read`, so plan construction and explicit prewarming
+need cancellable APIs. Individual group reconstruction must remain bounded. Avoid spawning
+unbounded nested async tasks when using `VolumeWii::HashGroup/EncryptGroup`; select a conservative
+worker policy in the calling reconstruction service.
+
+Advantages:
+
+* no multi-gigabyte ISO;
+* Analyze and WBFS writing share one normal reader abstraction;
+* WBFS reads only selected blocks after analysis;
+* supports preview and execution revalidation without materializing an output;
+* reconstruction remains reusable by future validation or conversion code.
+
+Costs/risks:
+
+* hardest mapping/caching implementation;
+* an initial index scan is unavoidable for variable-length gap/file records;
+* analysis may read decrypted file-system ranges in a pattern different from sequential WBFS
+  writing, so caching must avoid repeated crypto work;
+* original-source identity and virtual-reader identity must be modeled separately;
+* malformed lengths, integer overflow, and adversarial random reads require strict testing.
+
+Assessment: **recommended final architecture**.
+
+### Architecture C: direct NKit-aware WBFS adapter
+
+```text
+NKit -> special reconstruction/export adapter -> WBFS writer
+```
+
+If the adapter implements a conventional random-readable interface, it is Architecture B under a
+different name. If it writes WBFS directly, it must duplicate or bypass `DiscScrubber`, block-map
+analysis, source matching, temporary-output validation, and normal `VolumeWii` validation. It also
+makes NKit reconstruction unusable outside WBFS and encourages assumptions that omitted NKit bytes
+can map directly to omitted WBFS blocks.
+
+Assessment: **reject**. Keep one WBFS implementation.
+
+### Summary
+
+| Criterion | A: temporary ISO | B: on-demand reader | C: direct adapter |
+| --- | --- | --- | --- |
+| First proof correctness | Best | Harder | Poor boundary |
+| Disk cost | High | Low | Low |
+| Implementation complexity | Medium | High | Medium initially, high long-term |
+| Existing C2-C6 reuse | Complete after ISO | Complete | Partial/duplicated |
+| Cancellation/cleanup | File cleanup plus two passes | Plan/group cancellation, no ISO | Coupled to output |
+| Testability | Excellent oracle artifact | Excellent after span tests | WBFS-specific |
+| Final maintenance | Duplicate intermediate path | Clean DiscIO abstraction | Tight coupling |
+
+## 8. Recommended integration architecture
+
+### N3 proof
+
+Build a forward-only `NKitV1SequentialReconstructor` over the N2 parser/gap primitives. Its sole N3
+consumer writes an exclusive temporary ISO in a controlled test/proof API. Reopen it through
+`CreateBlobReader`/`CreateDisc`, validate it as conventional Wii, and call `AnalyzeWbfs`. Do not add
+Game List support or a production conversion button in N3.
+
+### Final production path
+
+Build `NKitV1ReconstructedBlobReader` on the same immutable plan and reconstruction primitives.
+Introduce a source-preparation seam before `AnalyzeWbfs`:
+
+```text
+original path
+  -> open outer reader + original VolumeWii
+  -> exact NKit v1 analysis
+  -> original-source fingerprint + reconstruction plan
+  -> reconstructed reader (effective conventional PLAIN)
+  -> CreateDisc(reconstructed_reader->CopyReader())
+  -> existing AnalyzeWbfs
+  -> existing planner / preview / execution contracts
+  -> execution recreates and revalidates original fingerprint + plan
+  -> existing WriteWbfs(reconstructed_reader, analysis)
+```
+
+Only after this path passes synthetic and controlled real validation should the native descriptor
+advertise `NKitInput`. `AnalyzeWbfs`'s NKit rejection remains correct for unreconstructed input.
+`WriteWbfs`, its split writer, final-output validation, collision policy, and C6 lifecycle should
+remain unchanged.
+
+The prepared-source model will eventually need:
+
+* original outer blob type and NKit version;
+* effective reconstructed blob type;
+* original-file identity/fingerprint;
+* immutable reconstruction-plan identity;
+* playable and archival assessments;
+* expected WBFS analysis over the reconstructed reader.
+
+## 9. Exact N2 implementation boundary
+
+N2 is a production-quality, read-only reconstruction **foundation**, not an exporter.
+
+### Files and types
+
+Add:
+
+* `Source/Core/DiscIO/NKitV1.h`
+* `Source/Core/DiscIO/NKitV1.cpp`
+* `Source/Core/DiscIO/NKitV1Reconstruction.h`
+* `Source/Core/DiscIO/NKitV1Reconstruction.cpp`
+* `Source/UnitTests/Core/NKitV1Test.cpp`
+* the minimal `DiscIO` and unit-test CMake list entries.
+
+Proposed public types:
+
+```text
+NKitV1Metadata
+NKitV1PartitionMetadata
+NKitV1Analysis
+NKitV1Error
+NKitV1RecoveryRequirement
+NKitV1PlayableAssessment
+NKitV1ArchivalAssessment
+NKitV1ReconstructionPlan
+NKitV1GapSpan
+NKitV1GapDecodeResult
+```
+
+Proposed functions/classes:
+
+```text
+AnalyzeWiiNKitV1(BlobReader&)
+BuildWiiNKitV1ReconstructionPlan(BlobReader&, const NKitV1Analysis&)
+DecodeNKitV1Gap(...)
+NKitV1JunkGenerator
+```
+
+Keep format-detail helpers private unless N3 needs them. Do not add a new `BlobType`; NKit v1 is an
+inner representation.
+
+### Responsibilities
+
+`AnalyzeWiiNKitV1`:
+
+* require Wii magic and exact `NKIT v01`;
+* parse all known top-level fields as big-endian;
+* validate `original_size_quads * 4` without overflow, size/alignment, source bounds, ID, partition
+  table bounds/counts/ordering, and presence of one supported data partition;
+* distinguish update-preserved and update-removed forms;
+* explicitly reject GameCube, unknown versions, NKit 2, RVT/custom unsupported layouts, truncated
+  metadata, and impossible sizes.
+
+`NKitV1ReconstructionPlan`:
+
+* be immutable after construction;
+* retain original outer type/size and a source-header fingerprint;
+* contain conventional output size, represented partition inventory, recovery requirements, and
+  separate playable/archival assessments;
+* synthesize the normalized conventional top-level disc header in memory. For playable mode with a
+  removed update, keep only represented partitions rather than creating an invalid table entry;
+* never claim `DataSizeType::Accurate` for a future reader until the whole v1 record scan validates.
+
+`DecodeNKitV1Gap` and `NKitV1JunkGenerator`:
+
+* decode all-junk, all-scrub/fill, mixed, repeat, literal, extended-length, and junk-file forms with
+  checked arithmetic and strict input/output limits;
+* produce typed output spans or reconstruct a caller-bounded memory range;
+* support deterministic seeking by disc/partition ID, disc number, logical length, and output
+  offset;
+* never write a file and never mutate the input reader.
+
+### Typed errors
+
+At minimum distinguish:
+
+```text
+ReadFailed
+NotWiiDisc
+NotNKit
+UnsupportedVersion
+UnsupportedPlatformOrVariant
+TruncatedHeader
+InvalidOriginalSize
+InvalidGameId
+InvalidPartitionTable
+MissingDataPartition
+MalformedGapRecord
+SpanOverflow
+UnexpectedEndOfInput
+RecoveryDataRequiredForArchival
+GameplayDataIncomplete
+```
+
+Errors must include a safe byte offset/partition index where applicable, but no game-data dump.
+
+### What N2 actually proves
+
+N2 will perform three real inverse operations entirely in memory on legal synthetic bytes:
+
+1. normalize a v1 top-level Wii disc header, clearing NKit metadata and restoring conventional
+   hash/encryption flags;
+2. decode v1 gap/run records into bounded literal/fill/junk output spans;
+3. regenerate deterministic Wii junk at arbitrary offsets and match fixed test vectors.
+
+It will also produce a validated reconstruction/recovery plan for update-present and
+update-removed synthetic headers. It will **not** yet rebuild partition payloads, hash/encrypt full
+groups, create an ISO/WBFS, alter Game List behavior, or advertise backend capability.
+
+### Initially recognized input
+
+N2 recognizes exact retail Wii `NKIT v01` metadata through an accurate, random-readable outer
+`BlobReader`. Tests must cover PLAIN and a synthetic GCZ-equivalent reader type at the parser layer,
+but no outer container is advertised until an on-disk test exists. GameCube v1 is detected and
+returned as unsupported, not accidentally parsed with Wii size semantics.
+
+## 10. N3 expected proof target
+
+N3 should extend the foundation just far enough to reconstruct one fully synthetic minimal retail
+Wii NKit v1 image to a temporary conventional ISO. The synthetic image must include a data
+partition, adjusted FST/file positions, at least one encoded deterministic gap, one literal/fill
+case, and enough ticket/key/hash structure to exercise group hashing and encryption.
+
+N3 succeeds only if:
+
+* the source bytes remain unchanged;
+* cancellation removes the temporary ISO;
+* the reconstructed size and normalized header match the plan;
+* `CreateDisc` returns `VolumeWii`, `IsNKit()` is false, and hashes/encryption are enabled;
+* the data partition and synthetic FST/file can be read;
+* retained groups pass block/H3 integrity checks used by the fixture;
+* `AnalyzeWbfs` succeeds on the reconstructed ISO;
+* malformed and recovery-required cases fail before finalization.
+
+Do not connect N3 to the Game List and do not process a real image unless a later prompt supplies an
+explicit controlled path.
+
+## 11. Legal synthetic fixture strategy
+
+No fixture may contain Nintendo/game files, keys copied from a title, or recovery partitions.
+
+### N2 fixtures
+
+Build byte vectors in the test itself:
+
+* a synthetic alphanumeric Wii ID and Wii magic;
+* exact/incorrect/truncated `NKIT v01` strings;
+* valid single-layer and dual-layer size fields plus overflow/unaligned/out-of-range values;
+* minimal bounded partition tables with synthetic offsets/types;
+* update CRC zero/nonzero;
+* each gap type, mixed run, repeat, literal payload, extended length, and malformed/truncated run;
+* deterministic junk generated from a made-up ID/disc number, with fixed expected byte hashes or
+  small byte vectors checked into the test;
+* mismatched platform magic, ID, version, and partition count.
+
+Generate expected vectors with a tiny independent script or the MIT reference implementation,
+record their provenance in test comments, and validate them in at least two implementations before
+freezing them. Do not run or bundle the external reference at test time.
+
+### N3 fixture builder
+
+A meaningful full Wii fixture is larger in structure than the existing filesystem-free
+`WbfsWriterTest` fake. Create a reusable test-only builder that:
+
+1. generates an entirely synthetic conventional Wii data partition in memory;
+2. uses a test-owned AES key/ticket-like structure accepted by the fixture boundary;
+3. uses Dolphin's hash/encryption primitives to make conventional groups;
+4. encodes that known disc into a minimal NKit v1 stream using a small test-only encoder that is
+   deliberately independent from the production decoder;
+5. retains the original conventional bytes as the oracle;
+6. compares sequential and random reconstructed reads against the oracle before WBFS analysis.
+
+If constructing a fully valid signed Wii partition is unnecessary for the first decoder tests,
+inject an abstract partition-group source and test mapping/hash/encryption separately. Do not make a
+fake so shallow that it proves only the four-byte marker; N3 must cross the real raw/decrypted
+partition boundary.
+
+Cancellation tests should stop during plan scan, gap generation, group reconstruction, and
+temporary writing. Malformed input tests should include arithmetic overflow, overlapping/backward
+spans, impossible output lengths, truncated preserved-hash data, and an incorrect synthetic ID.
+
+## 12. Risks and open questions
+
+The three largest risks before N2/N3 are:
+
+1. **Format completeness and exceptional hashes.** The public v1 code is the best available
+   behavior specification but is complex and lightly unit-tested. Hash-preservation, scrubbed
+   mixed groups, and odd/custom discs can silently produce structurally plausible bad data unless
+   every boundary is checked.
+2. **Playable missing-update policy.** Omitting an unavailable update partition from the normalized
+   table is cleaner than the reference reader's invalid filler placeholder for a WBFS scrub pass,
+   but it needs synthetic validation and a later real USB Loader GX acceptance test before being
+   called supported.
+3. **Random-access performance/correctness.** Turning a forward variable-length format into a
+   deterministic `BlobReader` requires a complete safe index, bounded encrypted-group cache, stable
+   `CopyReader` behavior, original-source identity, and cancellation outside `Read`.
+
+Additional questions:
+
+* Should the final reader report effective `BlobType::PLAIN`, or should `WbfsAnalysis` be decoupled
+  from `BlobType` through a prepared-source descriptor? Do not add `BlobType::NKIT`.
+* How should the source fingerprint cover a compressed outer file without hashing a multi-gigabyte
+  source during every preview? At minimum use validated metadata, outer raw/logical sizes, header,
+  and stable filesystem identity, then recheck before execution.
+* Can `VolumeWii::EncryptGroup` be adapted without its current internal async fan-out causing
+  excessive reconstruction threads?
+* Which outer containers should the first real acceptance matrix include after ISO and GCZ?
+* What exact integrity checks define `PlayableReady` for a deliberately normalized, non-archival
+  disc?
+
+## 13. Explicitly out of scope
+
+N1/N2/N3 do not include:
+
+* enabling NKit in Game List export or advertising `NKitInput`;
+* removing any current NKit blocker;
+* production NKit-to-ISO or NKit-to-WBFS conversion;
+* real user-image discovery, opening, hashing, or modification;
+* recovery-data downloads, databases, or bundled recovery partitions;
+* GameCube NKit export;
+* NKit 2 lossless WBFS/CISO/WIA or deduped scans;
+* external NKit/WIT tool execution;
+* overwrite, batch, release, C7, or C8 work.
+
+## 14. Recommended N2 objective
+
+> Implement the read-only Wii NKit v1 reconstruction foundation defined in
+> `docs/WiiExportNKitArchitecture.md`: exact metadata/partition validation, typed playable and
+> archival recovery assessments, immutable reconstruction planning, normalized in-memory disc
+> header generation, bounded v1 gap decoding, and deterministic random-offset Wii junk generation,
+> with comprehensive legal synthetic tests. Recognize only exact supported retail Wii `NKIT v01`
+> inputs, keep all Game List/backend NKit blockers intact, write no ISO/WBFS, use no real game data,
+> and stop before partition group reconstruction or export integration.
