@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <filesystem>
 #include <future>
 #include <limits>
 #include <memory>
@@ -24,11 +25,13 @@
 
 #include <gtest/gtest.h>
 
+#include "Common/DirectIOFile.h"
 #include "Common/Swap.h"
 #include "DiscIO/Blob.h"
 #include "DiscIO/DiscUtils.h"
 #include "DiscIO/Volume.h"
 #include "DiscIO/VolumeDisc.h"
+#include "DiscIO/WbfsBlob.h"
 #include "DolphinQt/GameList/WiiExportGameListExecution.h"
 #include "DolphinQt/GameList/WiiExportProgressDialog.h"
 #include "DolphinQt/WiiExportPreviewDialog.h"
@@ -480,6 +483,91 @@ TEST(WiiExportGameListExecutionQtTest, NativeBackendAndExecutionContractAreSelec
   EXPECT_EQ(state->invocation_count, 1);
   EXPECT_EQ(state->expected_backend_identifier, "dolphin-native-wbfs");
   EXPECT_EQ(result.execution->outcome, UICommon::WiiExportExecutionOutcome::Succeeded);
+}
+
+TEST(WiiExportGameListExecutionQtTest,
+     OnDiskIsoFlowsThroughPreviewExecutionAndPreservesSource)
+{
+  QTemporaryDir temporary_directory;
+  ASSERT_TRUE(temporary_directory.isValid());
+  const QString destination_path = temporary_directory.filePath(QStringLiteral("destination"));
+  ASSERT_TRUE(QDir().mkpath(destination_path));
+
+  GeneratedWiiReader generated_source;
+  std::vector<u8> original_source(SMALL_SOURCE_SIZE);
+  ASSERT_TRUE(generated_source.Read(0, original_source.size(), original_source.data()));
+  const std::string iso_path =
+      temporary_directory.filePath(QStringLiteral("synthetic.iso")).toStdString();
+  {
+    File::DirectIOFile iso_file(iso_path, File::AccessMode::Write);
+    ASSERT_TRUE(iso_file.IsOpen());
+    ASSERT_TRUE(iso_file.Write(original_source));
+    ASSERT_TRUE(iso_file.Flush());
+  }
+  const auto original_write_time = std::filesystem::last_write_time(iso_path);
+
+  DolphinQt::WiiExportGameListEntry entry = MakeEntry();
+  entry.source_path = iso_path;
+  entry.display_title = "C7A Synthetic ISO";
+  const UICommon::WiiExportDestinationInspection destination = {
+      .error = UICommon::WiiExportDestinationInspectionError::None,
+      .selected_path = destination_path.toStdString(),
+      .absolute_root = destination_path.toStdString(),
+      .raw_filesystem_type = "ext4",
+      .filesystem = UICommon::WiiExportDestinationFilesystem::LargeFileCapable,
+      .available_space_bytes = std::numeric_limits<u64>::max(),
+      .storage_valid = true,
+      .storage_ready = true,
+  };
+
+  const auto preview = DolphinQt::PrepareWiiExportGameListPreview(
+      entry, destination_path, {},
+      [&destination](const QString&) { return destination; });
+  ASSERT_TRUE(preview.IsPrepared());
+  ASSERT_TRUE(preview.source.prepared_source->analysis);
+  EXPECT_EQ(preview.source.prepared_source->source.blob_type, DiscIO::BlobType::PLAIN);
+  EXPECT_EQ(preview.source.prepared_source->analysis->GetSourceBlobType(),
+            DiscIO::BlobType::PLAIN);
+
+  UICommon::WiiExportPreviewModel model(*preview.source.prepared_source, NoCollisions);
+  ASSERT_TRUE(model.SelectDestination(destination));
+  ASSERT_EQ(model.GetState().readiness, UICommon::WiiExportPreviewReadiness::Ready);
+  const auto request = DolphinQt::CreateWiiExportGameListExecutionRequest(
+      entry, *preview.source.prepared_source, model.GetState());
+  ASSERT_TRUE(request);
+
+  DolphinQt::WiiExportGameListExecutionServices services;
+  services.destination_inspector =
+      [&destination](const QString&) { return destination; };
+  services.planned_path_inspector = NoCollisions;
+  const auto result = DolphinQt::RunWiiExportGameListExecution(
+      *request, {}, {}, std::move(services));
+
+  ASSERT_EQ(result.revalidation_error,
+            DolphinQt::WiiExportGameListRevalidationError::None);
+  ASSERT_TRUE(result.source_revalidation.prepared_source);
+  EXPECT_EQ(result.source_revalidation.prepared_source->source.blob_type,
+            DiscIO::BlobType::PLAIN);
+  ASSERT_TRUE(result.execution);
+  ASSERT_EQ(result.execution->outcome, UICommon::WiiExportExecutionOutcome::Succeeded);
+  ASSERT_EQ(result.execution->final_relative_paths.size(), 1);
+  const std::string output_path =
+      QDir(destination_path)
+          .filePath(QString::fromStdString(result.execution->final_relative_paths.front()))
+          .toStdString();
+  auto output = DiscIO::WbfsFileReader::Create(
+      File::DirectIOFile(output_path, File::AccessMode::Read), output_path);
+  ASSERT_NE(output, nullptr);
+  std::array<u8, 6> output_id6;
+  ASSERT_TRUE(output->Read(0, output_id6.size(), output_id6.data()));
+  EXPECT_EQ(output_id6, SYNTHETIC_ID6);
+
+  File::DirectIOFile preserved_iso(iso_path, File::AccessMode::Read);
+  ASSERT_TRUE(preserved_iso.IsOpen());
+  std::vector<u8> final_source(preserved_iso.GetSize());
+  ASSERT_TRUE(preserved_iso.Read(final_source));
+  EXPECT_EQ(final_source, original_source);
+  EXPECT_EQ(std::filesystem::last_write_time(iso_path), original_write_time);
 }
 
 TEST(WiiExportGameListExecutionQtTest, ValidatedProgressPropagatesToCaller)
