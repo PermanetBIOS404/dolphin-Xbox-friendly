@@ -1029,3 +1029,134 @@ and production `dolphin-emu` target both link successfully at `-j2`. Focused val
 N3 reconstruction tests, 43/43 N2 foundation regressions, 6/6 relevant SHA-1/TMD/DiscIO/WBFS-
 analysis regressions, and 5/5 no-output Wii Export bridge tests. The full Dolphin test suite was
 not run. No validation step called `WriteWbfs` or `ExecuteWiiExport`.
+
+## 17. N4 implementation status
+
+N4 implements the production reconstructed-source boundary on branch
+`feature/wii-export-n4-nkit-random-access`, based exactly on N3 commit
+`df69aa3b69b9177408dcc56cb79d3af31f539b6c`. It remains disconnected from DolphinQt, Game List
+capability advertising, and `ExecuteWiiExport`; an original compact NKit source still follows the
+existing `AnalyzeWbfs` rejection path.
+
+### Production files and API
+
+The random-access implementation is in:
+
+* `Source/Core/DiscIO/NKitV1ReconstructedBlob.h`
+* `Source/Core/DiscIO/NKitV1ReconstructedBlob.cpp`
+* `Source/Core/DiscIO/NKitV1SequentialReconstructor.h`
+* `Source/Core/DiscIO/NKitV1SequentialReconstructor.cpp`
+* `Source/Core/DiscIO/NKitV1.h`
+* the DiscIO CMake and Visual Studio source lists.
+
+`TryCreateWiiNKitV1ReconstructedReader` owns an already-decoded compact `BlobReader`, performs N2
+analysis and foundation planning, completes the N3-derived filesystem/group scan, builds an
+immutable `NKitV1ReconstructionIndex`, and returns a `NKitV1ReconstructedBlobReader` only when the
+entire supported address space validates. Failures retain the typed `NKitV1Error` channel.
+`PrewarmGroup` is the cancellable N5 execution seam; ordinary `BlobReader::Read` remains
+deterministic because the base interface has no cancellation channel.
+
+The effective reader reports `BlobType::PLAIN`, identical accurate raw/data sizes from validated
+original-size metadata, block size zero, no compression metadata, and a conventional byte view.
+It does not alter the original compact reader's container type or NKit marker.
+
+### Immutable reconstruction index and random reads
+
+The sorted index completely covers `[0, reconstructed_size)` without overlap or implicit holes.
+Its range kinds are generated disc header, source-backed disc literal, fill/zero, deterministic
+junk, generated partition header, and reconstructed raw partition group. Source and output bounds,
+range adjacency, group count, H3 capacity, FST counts, file sizes, compact offsets, arithmetic, and
+the final conventional geometry are checked before the reader is returned. `Read` binary-searches
+this index and stitches arbitrary subranges; it never reparses compact metadata.
+
+N4 generalizes the shared group transform to multiple complete 64-cluster groups. A requested
+group materializes only its `0x1f0000` decrypted bytes from indexed source/fill/junk spans, clears
+inner NKit metadata, applies every restored FST offset, validates the regenerated group H3 against
+the planned H3 table, and reuses `VolumeWii::EncryptGroup` for the conventional encrypted 2 MiB
+result. N3 sequential output now iterates the same transform, preserving the disposable-ISO proof
+as an independent regression.
+
+### FST and canonical gap context
+
+The supported filesystem scanner accepts a bounded root/FST with multiple named, positive-size
+regular files, including an FST entry order different from compacted data order. It validates the
+bounded name table, sorts by validated compacted offset, decodes the preceding canonical gap,
+reconstructs the conventional offset, and records a patch for the original FST field. Additional
+directory entries remain outside this deliberately narrow subset and return a typed unsupported-
+context result.
+
+Reference v1 behavior establishes that leading nulls are filesystem context rather than gap-record
+bits. N4 restores up to `0x1c` leading zero bytes when a junk span begins the first gap after the
+FST or the final gap, and after an ordinary file when the internal gap is smaller than `0x40000`.
+An internal gap of at least `0x40000` receives no leading-null substitution. This decision uses
+validated file/gap position, never neighboring byte heuristics. Junk-file removal, zero-length
+overlap conventions, malformed/overlapping compact offsets, and non-filesystem fallback streams
+return typed unsupported-context errors.
+
+### Cache, copies, and source identity
+
+Each reader has a deterministic two-entry least-recently-used encrypted-group cache. Resident
+derived bytes are capped at 4 MiB; group construction adds one bounded decrypted and one candidate
+encrypted buffer, and no allocation scales with the conventional disc size. Hits, misses, builds,
+evictions, resident groups, and resident bytes are observable for focused tests.
+
+`CopyReader` copies the underlying source reader, shares only the immutable index/plan, and starts
+with an independent empty cache and error state. Destroying either copy cannot invalidate the
+other. This follows the base `BlobReader` contract, which explicitly makes one instance
+non-thread-safe and uses copies for parallel ownership.
+
+The plan retains the original outer type, logical/raw sizes, disc ID/metadata, and SHA-1 of the
+bounded fixed NKit header. Creation and explicit revalidation compare all of them, and ordinary
+reads revalidate the bounded header before returning virtual bytes. Partition payload changes are
+also caught when regenerated H3 differs from the immutable plan. This is a stable reconstruction
+identity check, not a claim to hash an entire multi-gigabyte outer image.
+
+### Synthetic direct-reader and WBFS bridge proof
+
+The N4 coverage extends `NKitV1SequentialReconstructorTest.cpp` with an entirely programmatic
+three-group conventional oracle and independent compact v1 encoder. The fixture uses invented ID
+`RN4P01`, synthetic ticket/title-key material, three differently sized files, nontrivial FST/data
+ordering, canonical leading-null and non-leading junk contexts, mixed literal/fill/junk gaps, a
+three-entry H3 table, and the normal Dolphin hash/AES path. No binary fixture or real game material
+is used.
+
+The reconstructed reader is compared byte-for-byte with the oracle across its complete stored
+prefix and targeted random/cross-range/cross-group reads. Normal `CreateDisc` opens a conventional
+Wii volume directly over `CopyReader`, reports `IsNKit() == false`, validates all three group/H3
+relationships, and reads all three files. `AnalyzeWbfs` accepts that direct conventional view. A
+test then passes the same production reader to the unchanged `WriteWbfs`, reopens the temporary
+synthetic WBFS through normal DiscIO, verifies ID/FST/file bytes, and checks success/cancellation
+cleanup. No ISO participates in this N4 production path, while the N3 temporary-ISO test remains.
+
+### N4 support and rejection matrix
+
+| Case | N4 result |
+| --- | --- |
+| Exact Wii retail `NKIT v01`, PLAIN accurate source, one retained data partition, single-layer geometry, one or more complete normal-hash groups, supported regular-file contexts | Supported |
+| Multiple root-level regular files, reordered compact data, canonical leading-null and large internal junk gaps | Supported within fixed scan/file limits |
+| Retained update/additional partitions | Unsupported but recognized |
+| Removed-update CRC/recovery requirement | Recovery required; factory refuses self-contained reader |
+| Preserved/exceptional hash flags or scrub/hash forms | Unsupported but recognized |
+| Additional directory entries, junk-file removal, overlapping/zero-length-file context, non-filesystem fallback | Unsupported gap context |
+| Malformed tables, ranges, FST, gaps, hashes, identity, or arithmetic | Malformed/invalid; no reader |
+| GCZ/RVZ/WIA compact outer source or dual-layer Wii geometry | Out of current tested subset |
+| GameCube NKit v1 | Recognized GameCube and rejected |
+| `NKIT v02`-like inner version | Unsupported v1 version; not mislabeled as NKit 2 |
+| NKit 2 container/deduplicated forms | Out of format and out of scope |
+
+### Exact N5 boundary
+
+N5 should introduce a prepared-source recipe in the Wii Export Assistant that preserves original
+outer identity separately from this effective conventional reader, recreates and revalidates the
+factory result for execution, and enables only the N4-supported matrix in preview/preflight/native
+capability handling. Direct compact NKit must remain blocked, recovery/unsupported cases must stay
+explicitly unavailable, and the existing `AnalyzeWbfs`/`WriteWbfs` staging, validation,
+cancellation, collision, and publication code must remain authoritative. Controlled real-user
+testing, additional outer containers, dual-layer coverage, exceptional hashes, and recovery data
+remain later milestones.
+
+### N4 validation checkpoint
+
+The N4 checkpoint is configured as Ninja `RelWithDebInfo` with tests and Qt enabled. Focused N4,
+N3, N2, relevant DiscIO, and Wii Export capability results are recorded in the N4 review report;
+the complete Dolphin suite is intentionally not part of the default milestone validation.

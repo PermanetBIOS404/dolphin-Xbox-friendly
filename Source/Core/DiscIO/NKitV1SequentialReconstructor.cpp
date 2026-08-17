@@ -5,8 +5,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -32,12 +34,23 @@ constexpr u64 INNER_ORIGINAL_SIZE_FIELD = 0x210;
 constexpr u64 INNER_FST_OFFSET_FIELD = 0x424;
 constexpr u64 INNER_FST_SIZE_FIELD = 0x428;
 constexpr u64 FST_ENTRY_SIZE = 12;
-constexpr u64 MAX_COMPACTED_PARTITION_SIZE = 8 * 1024 * 1024;
+constexpr u64 MAX_COMPACTED_PARTITION_SIZE = 16 * 1024 * 1024;
 constexpr u64 MAX_PREFIX_ENCODING_SIZE = 1024 * 1024;
 constexpr u64 MAX_FST_SIZE = 1024 * 1024;
-constexpr u64 MAX_FILE_SIZE = 1024 * 1024;
+constexpr u64 MAX_FILE_SIZE = 4 * 1024 * 1024;
+constexpr u32 MAX_FST_ENTRIES = 4096;
 constexpr size_t IO_CHUNK_SIZE = 64 * 1024;
+constexpr u64 CANONICAL_LEADING_NULLS = 0x1c;
+constexpr u64 INTERNAL_LARGE_GAP = 0x40000;
 constexpr std::string_view NKIT_V1_SIGNATURE = "NKIT v01";
+
+struct FstFile
+{
+  u64 field_offset = 0;
+  u64 compacted_offset = 0;
+  u64 size = 0;
+  u64 aligned_size = 0;
+};
 
 NKitV1Error Error(NKitV1ErrorCode code, u64 source_offset = 0,
                   u32 partition_index = WII_NKIT_V1_NO_PARTITION)
@@ -102,11 +115,139 @@ bool IsCancelled(const std::function<bool()>& callback)
 {
   return callback && callback();
 }
+
+NKitV1Result<void> ValidateSource(BlobReader& source,
+                                  const NKitV1SequentialReconstructionPlan& plan)
+{
+  const NKitV1Metadata& metadata = plan.GetFoundationPlan().GetMetadata();
+  if (source.GetBlobType() != metadata.GetSourceBlobType() ||
+      source.GetDataSizeType() != DataSizeType::Accurate ||
+      source.GetDataSize() != metadata.GetSourceLogicalSize() ||
+      source.GetRawSize() != metadata.GetSourceRawSize())
+  {
+    return std::unexpected(Error(NKitV1ErrorCode::SourceIdentityMismatch));
+  }
+
+  auto header = ReadBounded(source, 0, WII_NKIT_V1_HEADER_SIZE, WII_NKIT_V1_HEADER_SIZE);
+  if (!header)
+    return std::unexpected(header.error());
+  if (Common::SHA1::CalculateDigest(*header) !=
+      plan.GetFoundationPlan().GetSourceHeaderFingerprint())
+  {
+    return std::unexpected(Error(NKitV1ErrorCode::SourceIdentityMismatch));
+  }
+  return {};
+}
+
+NKitV1Result<void> ValidateSpanCoverage(std::span<const NKitV1SequentialSpan> spans, u64 size,
+                                        u32 partition_index)
+{
+  u64 cursor = 0;
+  for (const NKitV1SequentialSpan& span : spans)
+  {
+    if (span.GetAddressSpace() != NKitV1GapAddressSpace::PartitionDecryptedData ||
+        span.GetLength() == 0 || span.GetReconstructedOffset() != cursor ||
+        cursor > size || span.GetLength() > size - cursor)
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
+                                   span.GetSourceOffset(), partition_index));
+    }
+    cursor += span.GetLength();
+  }
+  if (cursor != size)
+    return std::unexpected(
+        Error(NKitV1ErrorCode::InvalidSequentialLayout, cursor, partition_index));
+  return {};
+}
+
+NKitV1Result<void> MaterializeDecryptedGroup(
+    BlobReader& source, const NKitV1SequentialPartition& partition, u64 group_index,
+    std::array<std::array<u8, VolumeWii::BLOCK_DATA_SIZE>, VolumeWii::BLOCKS_PER_GROUP>* output,
+    const std::function<bool()>& cancellation_callback)
+{
+  constexpr u32 partition_index = 0;
+  if (group_index >= partition.GetGroupCount())
+    return std::unexpected(Error(NKitV1ErrorCode::InvalidRange, group_index, partition_index));
+  if (IsCancelled(cancellation_callback))
+    return std::unexpected(Error(NKitV1ErrorCode::Cancelled, group_index, partition_index));
+
+  const u64 group_start = group_index * VolumeWii::GROUP_DATA_SIZE;
+  const u64 group_end = group_start + VolumeWii::GROUP_DATA_SIZE;
+  u8* destination = reinterpret_cast<u8*>(output->data());
+  auto junk = NKitV1JunkGenerator::Create(partition.GetId(), partition.GetDiscNumber(),
+                                          partition.GetDecryptedDataSize());
+  if (!junk)
+    return std::unexpected(junk.error());
+
+  u64 covered = group_start;
+  for (const NKitV1SequentialSpan& span : partition.GetDecryptedSpans())
+  {
+    const u64 span_start = span.GetReconstructedOffset();
+    const u64 span_end = span_start + span.GetLength();
+    if (span_end <= group_start)
+      continue;
+    if (span_start >= group_end)
+      break;
+    const u64 copy_start = std::max(span_start, group_start);
+    const u64 copy_end = std::min(span_end, group_end);
+    if (copy_start != covered)
+      return std::unexpected(
+          Error(NKitV1ErrorCode::InvalidSequentialLayout, copy_start, partition_index));
+    const u64 span_delta = copy_start - span_start;
+    const u64 group_delta = copy_start - group_start;
+    const size_t length = static_cast<size_t>(copy_end - copy_start);
+    if (span.GetKind() == NKitV1SequentialSpanKind::Source)
+    {
+      if (!source.Read(span.GetSourceOffset() + span_delta, length, destination + group_delta))
+      {
+        return std::unexpected(Error(NKitV1ErrorCode::ReadFailed,
+                                     span.GetSourceOffset() + span_delta, partition_index));
+      }
+    }
+    else if (span.GetKind() == NKitV1SequentialSpanKind::Fill)
+    {
+      std::fill_n(destination + group_delta, length, span.GetFillByte());
+    }
+    else
+    {
+      auto result = junk->Generate(copy_start, std::span<u8>(destination + group_delta, length));
+      if (!result)
+        return std::unexpected(result.error());
+    }
+    covered = copy_end;
+    if (IsCancelled(cancellation_callback))
+      return std::unexpected(Error(NKitV1ErrorCode::Cancelled, copy_start, partition_index));
+  }
+  if (covered != group_end)
+    return std::unexpected(
+        Error(NKitV1ErrorCode::InvalidSequentialLayout, covered, partition_index));
+
+  const u64 metadata_end = INNER_METADATA_OFFSET + INNER_METADATA_SIZE;
+  if (INNER_METADATA_OFFSET < group_end && metadata_end > group_start)
+  {
+    const u64 start = std::max(INNER_METADATA_OFFSET, group_start);
+    const u64 end = std::min(metadata_end, group_end);
+    std::fill_n(destination + start - group_start, static_cast<size_t>(end - start), 0);
+  }
+  for (const NKitV1FstOffsetPatch& patch : partition.GetFstOffsetPatches())
+  {
+    if (patch.GetFieldOffset() < group_start || patch.GetFieldOffset() + 4 > group_end ||
+        patch.GetReconstructedFileOffset() / 4 > std::numeric_limits<u32>::max())
+    {
+      continue;
+    }
+    WriteBigEndianU32(std::span<u8>(destination, VolumeWii::GROUP_DATA_SIZE),
+                      static_cast<size_t>(patch.GetFieldOffset() - group_start),
+                      static_cast<u32>(patch.GetReconstructedFileOffset() / 4));
+  }
+  return {};
+}
 }  // namespace
 
 NKitV1Result<NKitV1SequentialReconstructionPlan>
-BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
-                                            const NKitV1ReconstructionPlan& foundation_plan)
+BuildWiiNKitV1SequentialReconstructionPlan(
+    BlobReader& source, const NKitV1ReconstructionPlan& foundation_plan,
+    const std::function<bool()>& cancellation_callback)
 {
   constexpr u32 partition_index = 0;
   const NKitV1Metadata& metadata = foundation_plan.GetMetadata();
@@ -116,7 +257,9 @@ BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
     return std::unexpected(Error(NKitV1ErrorCode::ExternalRecoveryRequired));
   }
   if (metadata.GetPartitions().size() != 1 ||
-      metadata.GetPartitions()[0].GetType() != NKitV1PartitionType::Data)
+      metadata.GetPartitions()[0].GetType() != NKitV1PartitionType::Data ||
+      metadata.GetOriginalSize() != SL_DVD_SIZE ||
+      metadata.GetSourceBlobType() != BlobType::PLAIN)
   {
     return std::unexpected(Error(NKitV1ErrorCode::UnsupportedReconstructionFeature));
   }
@@ -125,74 +268,108 @@ BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
       source.GetDataSize() != metadata.GetSourceLogicalSize() ||
       source.GetRawSize() != metadata.GetSourceRawSize())
   {
-    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout));
+    return std::unexpected(Error(NKitV1ErrorCode::SourceIdentityMismatch));
   }
+  if (IsCancelled(cancellation_callback))
+    return std::unexpected(Error(NKitV1ErrorCode::Cancelled));
 
-  auto source_header_result = ReadBounded(source, 0, WII_NKIT_V1_HEADER_SIZE,
-                                          WII_NKIT_V1_HEADER_SIZE);
-  if (!source_header_result)
-    return std::unexpected(source_header_result.error());
-  if (Common::SHA1::CalculateDigest(*source_header_result) !=
+  auto source_header =
+      ReadBounded(source, 0, WII_NKIT_V1_HEADER_SIZE, WII_NKIT_V1_HEADER_SIZE);
+  if (!source_header)
+    return std::unexpected(source_header.error());
+  if (Common::SHA1::CalculateDigest(*source_header) !=
       foundation_plan.GetSourceHeaderFingerprint())
   {
-    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout));
+    return std::unexpected(Error(NKitV1ErrorCode::SourceIdentityMismatch));
   }
 
   const NKitV1PartitionMetadata& source_partition = metadata.GetPartitions()[0];
-  if (source_partition.GetOriginalRawSize() != VolumeWii::GROUP_TOTAL_SIZE ||
-      source_partition.GetOriginalDecryptedSize() != VolumeWii::GROUP_DATA_SIZE)
+  const u64 group_count = source_partition.GetOriginalRawSize() / VolumeWii::GROUP_TOTAL_SIZE;
+  if (group_count == 0 ||
+      group_count > WII_PARTITION_H3_SIZE / Common::SHA1::DIGEST_LEN ||
+      source_partition.GetOriginalRawSize() % VolumeWii::GROUP_TOTAL_SIZE != 0 ||
+      source_partition.GetOriginalDecryptedSize() != group_count * VolumeWii::GROUP_DATA_SIZE)
   {
     return std::unexpected(Error(NKitV1ErrorCode::UnsupportedReconstructionFeature,
                                  source_partition.GetSourceDataOffset(), partition_index));
   }
   if (source_partition.GetSourceOffset() < WII_NKIT_V1_HEADER_SIZE)
+  {
     return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
                                  source_partition.GetSourceOffset(), partition_index));
+  }
 
-  const auto convert_gap_spans = [&](std::span<const NKitV1GapSpan> gap_spans) {
+  const auto convert_gap_spans = [&](std::span<const NKitV1GapSpan> gaps,
+                                     bool canonical_filesystem_context,
+                                     bool first_or_last_gap) {
     std::vector<NKitV1SequentialSpan> spans;
-    spans.reserve(gap_spans.size());
-    for (const NKitV1GapSpan& gap : gap_spans)
+    spans.reserve(gaps.size() + 1);
+    u64 leading_nulls = 0;
+    if (canonical_filesystem_context && !gaps.empty())
     {
-      NKitV1SequentialSpan span;
-      span.m_address_space = gap.GetAddressSpace();
-      span.m_reconstructed_offset = gap.GetReconstructedOffset();
-      span.m_length = gap.GetLength();
-      span.m_source_offset = gap.GetSourceOffset();
-      span.m_fill_byte = gap.GetFillByte();
-      switch (gap.GetKind())
+      u64 gap_size = 0;
+      for (const NKitV1GapSpan& gap : gaps)
+        gap_size += gap.GetLength();
+      if (first_or_last_gap || gap_size < INTERNAL_LARGE_GAP)
+        leading_nulls = std::min(CANONICAL_LEADING_NULLS, gap_size);
+    }
+
+    bool at_gap_start = true;
+    for (const NKitV1GapSpan& gap : gaps)
+    {
+      const auto append = [&](u64 offset, u64 length, NKitV1SequentialSpanKind kind,
+                              u64 source_offset, u8 fill) {
+        if (length == 0)
+          return;
+        NKitV1SequentialSpan span;
+        span.m_address_space = gap.GetAddressSpace();
+        span.m_reconstructed_offset = offset;
+        span.m_length = length;
+        span.m_kind = kind;
+        span.m_source_offset = source_offset;
+        span.m_fill_byte = fill;
+        spans.emplace_back(std::move(span));
+      };
+
+      NKitV1SequentialSpanKind kind = NKitV1SequentialSpanKind::Source;
+      if (gap.GetKind() == NKitV1GapSpanKind::Junk)
+        kind = NKitV1SequentialSpanKind::Junk;
+      else if (gap.GetKind() == NKitV1GapSpanKind::Fill)
+        kind = NKitV1SequentialSpanKind::Fill;
+
+      if (at_gap_start && kind == NKitV1SequentialSpanKind::Junk && leading_nulls != 0)
       {
-      case NKitV1GapSpanKind::Junk:
-        span.m_kind = NKitV1SequentialSpanKind::Junk;
-        break;
-      case NKitV1GapSpanKind::Fill:
-        span.m_kind = NKitV1SequentialSpanKind::Fill;
-        break;
-      case NKitV1GapSpanKind::Literal:
-        span.m_kind = NKitV1SequentialSpanKind::Source;
-        break;
+        const u64 zeros = std::min(leading_nulls, gap.GetLength());
+        append(gap.GetReconstructedOffset(), zeros, NKitV1SequentialSpanKind::Fill, 0, 0);
+        append(gap.GetReconstructedOffset() + zeros, gap.GetLength() - zeros, kind,
+               gap.GetSourceOffset(), gap.GetFillByte());
       }
-      spans.emplace_back(std::move(span));
+      else
+      {
+        append(gap.GetReconstructedOffset(), gap.GetLength(), kind, gap.GetSourceOffset(),
+               gap.GetFillByte());
+      }
+      at_gap_start = false;
     }
     return spans;
   };
 
   const u64 prefix_source_size =
       source_partition.GetSourceOffset() - WII_NKIT_V1_HEADER_SIZE;
-  auto prefix_result = ReadBounded(source, WII_NKIT_V1_HEADER_SIZE, prefix_source_size,
-                                   MAX_PREFIX_ENCODING_SIZE, partition_index);
-  if (!prefix_result)
-    return std::unexpected(prefix_result.error());
+  auto prefix = ReadBounded(source, WII_NKIT_V1_HEADER_SIZE, prefix_source_size,
+                            MAX_PREFIX_ENCODING_SIZE, partition_index);
+  if (!prefix)
+    return std::unexpected(prefix.error());
   NKitV1GapDecodeOptions prefix_options;
   prefix_options.address_space = NKitV1GapAddressSpace::Disc;
   prefix_options.reconstructed_offset = WII_NKIT_V1_HEADER_SIZE;
   prefix_options.encoded_source_offset = WII_NKIT_V1_HEADER_SIZE;
   prefix_options.maximum_reconstructed_size = foundation_plan.GetReconstructedSize();
-  auto decoded_prefix = DecodeNKitV1Gap(*prefix_result, prefix_options);
+  auto decoded_prefix = DecodeNKitV1Gap(*prefix, prefix_options);
   if (!decoded_prefix)
     return std::unexpected(decoded_prefix.error());
-  if (!std::all_of(prefix_result->begin() + decoded_prefix->GetEncodedBytesConsumed(),
-                   prefix_result->end(), [](u8 byte) { return byte == 0; }))
+  if (!std::all_of(prefix->begin() + decoded_prefix->GetEncodedBytesConsumed(), prefix->end(),
+                   [](u8 byte) { return byte == 0; }))
   {
     return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
                                  WII_NKIT_V1_HEADER_SIZE +
@@ -202,28 +379,25 @@ BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
 
   u64 reconstructed_partition_offset = 0;
   if (!CheckedAdd(WII_NKIT_V1_HEADER_SIZE, decoded_prefix->GetReconstructedBytes(),
-                  &reconstructed_partition_offset))
+                  &reconstructed_partition_offset) ||
+      reconstructed_partition_offset % VolumeWii::BLOCK_TOTAL_SIZE != 0)
   {
-    return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
-                                 WII_NKIT_V1_HEADER_SIZE, partition_index));
-  }
-  if (reconstructed_partition_offset % VolumeWii::BLOCK_TOTAL_SIZE != 0)
     return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
                                  WII_NKIT_V1_HEADER_SIZE, partition_index));
+  }
 
-  auto partition_header_result =
+  auto partition_header =
       ReadBounded(source, source_partition.GetSourceOffset(), PARTITION_HEADER_SIZE,
                   PARTITION_HEADER_SIZE, partition_index);
-  if (!partition_header_result)
-    return std::unexpected(partition_header_result.error());
-
-  auto payload_result = ReadBounded(source, source_partition.GetSourceDataOffset(),
-                                    source_partition.GetSourceStoredSize(),
-                                    MAX_COMPACTED_PARTITION_SIZE, partition_index);
-  if (!payload_result)
-    return std::unexpected(payload_result.error());
-  const std::vector<u8>& payload = *payload_result;
-  if (payload.size() < 0x440 || !HasBytes(payload, INNER_METADATA_OFFSET, NKIT_V1_SIGNATURE))
+  if (!partition_header)
+    return std::unexpected(partition_header.error());
+  auto payload = ReadBounded(source, source_partition.GetSourceDataOffset(),
+                             source_partition.GetSourceStoredSize(),
+                             MAX_COMPACTED_PARTITION_SIZE, partition_index);
+  if (!payload)
+    return std::unexpected(payload.error());
+  if (payload->size() < 0x440 ||
+      !HasBytes(*payload, INNER_METADATA_OFFSET, NKIT_V1_SIGNATURE))
   {
     return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
                                  source_partition.GetSourceDataOffset() + INNER_METADATA_OFFSET,
@@ -231,25 +405,21 @@ BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
   }
 
   u64 original_raw_size = 0;
-  if (!CheckedMultiply(ReadBigEndianU32(payload, INNER_ORIGINAL_SIZE_FIELD), 4,
-                       &original_raw_size))
+  if (!CheckedMultiply(ReadBigEndianU32(*payload, INNER_ORIGINAL_SIZE_FIELD), 4,
+                       &original_raw_size) ||
+      original_raw_size != source_partition.GetOriginalRawSize())
   {
-    return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
-                                 source_partition.GetSourceDataOffset() +
-                                     INNER_ORIGINAL_SIZE_FIELD,
-                                 partition_index));
-  }
-  if (original_raw_size != source_partition.GetOriginalRawSize())
     return std::unexpected(Error(NKitV1ErrorCode::InvalidWiiGeometry,
                                  source_partition.GetSourceDataOffset() +
                                      INNER_ORIGINAL_SIZE_FIELD,
                                  partition_index));
+  }
 
   u64 fst_offset = 0;
   u64 fst_size = 0;
   u64 fst_end = 0;
-  if (!CheckedMultiply(ReadBigEndianU32(payload, INNER_FST_OFFSET_FIELD), 4, &fst_offset) ||
-      !CheckedMultiply(ReadBigEndianU32(payload, INNER_FST_SIZE_FIELD), 4, &fst_size) ||
+  if (!CheckedMultiply(ReadBigEndianU32(*payload, INNER_FST_OFFSET_FIELD), 4, &fst_offset) ||
+      !CheckedMultiply(ReadBigEndianU32(*payload, INNER_FST_SIZE_FIELD), 4, &fst_size) ||
       !CheckedAdd(fst_offset, fst_size, &fst_end))
   {
     return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
@@ -257,7 +427,7 @@ BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
                                  partition_index));
   }
   if (fst_offset < 0x440 || fst_size < FST_ENTRY_SIZE * 2 || fst_size > MAX_FST_SIZE ||
-      fst_end > payload.size())
+      fst_end > payload->size())
   {
     return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
                                  source_partition.GetSourceDataOffset() + INNER_FST_OFFSET_FIELD,
@@ -265,40 +435,82 @@ BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
   }
 
   const size_t fst = static_cast<size_t>(fst_offset);
-  if (ReadBigEndianU32(payload, fst) != 0x01000000 ||
-      ReadBigEndianU32(payload, fst + 8) != 2 || (payload[fst + FST_ENTRY_SIZE] & 0x01) != 0)
+  const u32 entry_count = ReadBigEndianU32(*payload, fst + 8);
+  u64 entry_bytes = 0;
+  if (ReadBigEndianU32(*payload, fst) != 0x01000000 || entry_count < 2 ||
+      entry_count > MAX_FST_ENTRIES ||
+      !CheckedMultiply(entry_count, FST_ENTRY_SIZE, &entry_bytes) || entry_bytes > fst_size)
   {
-    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedReconstructionFeature,
+    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
                                  source_partition.GetSourceDataOffset() + fst_offset,
                                  partition_index));
   }
-  const u64 fst_file_offset_field = fst_offset + FST_ENTRY_SIZE + 4;
-  u64 compacted_file_offset = 0;
-  if (!CheckedMultiply(ReadBigEndianU32(payload, static_cast<size_t>(fst_file_offset_field)), 4,
-                       &compacted_file_offset))
+  const u64 name_table_offset = fst_offset + entry_bytes;
+  if (name_table_offset >= fst_end)
   {
-    return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
-                                 source_partition.GetSourceDataOffset() + fst_file_offset_field,
+    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
+                                 source_partition.GetSourceDataOffset() + fst_offset,
                                  partition_index));
   }
-  const u64 file_size = ReadBigEndianU32(payload, fst + FST_ENTRY_SIZE + 8);
-  if (file_size == 0 || file_size > MAX_FILE_SIZE)
-    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedReconstructionFeature,
-                                 source_partition.GetSourceDataOffset() + fst_file_offset_field,
-                                 partition_index));
-  const u64 aligned_file_size = Common::AlignUp(file_size, 4ull);
 
-  const u64 group_count = source_partition.GetOriginalRawSize() / VolumeWii::GROUP_TOTAL_SIZE;
+  std::vector<FstFile> files;
+  files.reserve(entry_count - 1);
+  for (u32 entry = 1; entry < entry_count; ++entry)
+  {
+    const u64 entry_offset = fst_offset + static_cast<u64>(entry) * FST_ENTRY_SIZE;
+    if ((*payload)[static_cast<size_t>(entry_offset)] != 0)
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
+                                   source_partition.GetSourceDataOffset() + entry_offset,
+                                   partition_index));
+    }
+    const u32 name_offset =
+        ReadBigEndianU32(*payload, static_cast<size_t>(entry_offset)) & 0xffffff;
+    u64 name_position = 0;
+    if (!CheckedAdd(name_table_offset, name_offset, &name_position) ||
+        name_position >= fst_end || (*payload)[static_cast<size_t>(name_position)] == 0 ||
+        std::find(payload->begin() + name_position, payload->begin() + fst_end, 0) ==
+            payload->begin() + fst_end)
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
+                                   source_partition.GetSourceDataOffset() + entry_offset,
+                                   partition_index));
+    }
+    FstFile file;
+    file.field_offset = entry_offset + 4;
+    if (!CheckedMultiply(ReadBigEndianU32(*payload, static_cast<size_t>(file.field_offset)), 4,
+                         &file.compacted_offset))
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
+                                   source_partition.GetSourceDataOffset() + file.field_offset,
+                                   partition_index));
+    }
+    file.size = ReadBigEndianU32(*payload, static_cast<size_t>(entry_offset + 8));
+    if (file.size == 0 || file.size > MAX_FILE_SIZE)
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
+                                   source_partition.GetSourceDataOffset() + entry_offset,
+                                   partition_index));
+    }
+    file.aligned_size = Common::AlignUp(file.size, 4ull);
+    files.emplace_back(file);
+  }
+  if (files.empty())
+  {
+    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
+                                 source_partition.GetSourceDataOffset() + fst_offset,
+                                 partition_index));
+  }
+  std::ranges::sort(files, [](const FstFile& lhs, const FstFile& rhs) {
+    if (lhs.compacted_offset != rhs.compacted_offset)
+      return lhs.compacted_offset < rhs.compacted_offset;
+    return lhs.size < rhs.size;
+  });
+
   const u64 hash_flag_size = Common::AlignUp(group_count, 32ull) / 8;
   u64 hash_flags_end = 0;
-  if (!CheckedAdd(fst_end, hash_flag_size, &hash_flags_end) ||
-      hash_flags_end > compacted_file_offset || compacted_file_offset > payload.size())
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
-                                 source_partition.GetSourceDataOffset() + fst_end,
-                                 partition_index));
-  }
-  if (!std::all_of(payload.begin() + fst_end, payload.begin() + hash_flags_end,
+  if (!CheckedAdd(fst_end, hash_flag_size, &hash_flags_end) || hash_flags_end > payload->size() ||
+      !std::all_of(payload->begin() + fst_end, payload->begin() + hash_flags_end,
                    [](u8 byte) { return byte == 0; }))
   {
     return std::unexpected(Error(NKitV1ErrorCode::UnsupportedReconstructionFeature,
@@ -312,106 +524,129 @@ BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
   partition.m_data_offset = PARTITION_HEADER_SIZE;
   partition.m_raw_data_size = source_partition.GetOriginalRawSize();
   partition.m_decrypted_data_size = source_partition.GetOriginalDecryptedSize();
-  partition.m_fst_file_offset_field = fst_file_offset_field;
-  std::copy_n(payload.begin(), partition.m_id.size(), partition.m_id.begin());
-  partition.m_disc_number = payload[6];
+  std::copy_n(payload->begin(), partition.m_id.size(), partition.m_id.begin());
+  partition.m_disc_number = (*payload)[6];
 
-  NKitV1SequentialSpan prefix_span;
-  prefix_span.m_address_space = NKitV1GapAddressSpace::PartitionDecryptedData;
-  prefix_span.m_reconstructed_offset = 0;
-  prefix_span.m_length = fst_end;
-  prefix_span.m_kind = NKitV1SequentialSpanKind::Source;
-  prefix_span.m_source_offset = source_partition.GetSourceDataOffset();
-  partition.m_decrypted_spans.emplace_back(std::move(prefix_span));
+  NKitV1SequentialSpan fixed_prefix;
+  fixed_prefix.m_address_space = NKitV1GapAddressSpace::PartitionDecryptedData;
+  fixed_prefix.m_reconstructed_offset = 0;
+  fixed_prefix.m_length = fst_end;
+  fixed_prefix.m_kind = NKitV1SequentialSpanKind::Source;
+  fixed_prefix.m_source_offset = source_partition.GetSourceDataOffset();
+  partition.m_decrypted_spans.emplace_back(std::move(fixed_prefix));
 
-  const u64 pre_file_encoding_size = compacted_file_offset - hash_flags_end;
-  NKitV1GapDecodeOptions pre_file_options;
-  pre_file_options.address_space = NKitV1GapAddressSpace::PartitionDecryptedData;
-  pre_file_options.partition_index = partition_index;
-  pre_file_options.reconstructed_offset = fst_end;
-  pre_file_options.encoded_source_offset = source_partition.GetSourceDataOffset() + hash_flags_end;
-  pre_file_options.maximum_reconstructed_size = source_partition.GetOriginalDecryptedSize();
-  auto decoded_pre_file = DecodeNKitV1Gap(
-      std::span<const u8>(payload).subspan(static_cast<size_t>(hash_flags_end),
-                                          static_cast<size_t>(pre_file_encoding_size)),
-      pre_file_options);
-  if (!decoded_pre_file)
-    return std::unexpected(decoded_pre_file.error());
-  if (decoded_pre_file->GetEncodedBytesConsumed() != pre_file_encoding_size)
+  u64 source_cursor = hash_flags_end;
+  u64 reconstructed_cursor = fst_end;
+  for (size_t file_index = 0; file_index < files.size(); ++file_index)
+  {
+    if (IsCancelled(cancellation_callback))
+      return std::unexpected(Error(NKitV1ErrorCode::Cancelled, source_cursor, partition_index));
+    const FstFile& file = files[file_index];
+    if (file.compacted_offset < source_cursor || file.compacted_offset > payload->size())
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
+                                   source_partition.GetSourceDataOffset() + source_cursor,
+                                   partition_index));
+    }
+    NKitV1GapDecodeOptions gap_options;
+    gap_options.address_space = NKitV1GapAddressSpace::PartitionDecryptedData;
+    gap_options.partition_index = partition_index;
+    gap_options.reconstructed_offset = reconstructed_cursor;
+    gap_options.encoded_source_offset = source_partition.GetSourceDataOffset() + source_cursor;
+    gap_options.maximum_reconstructed_size = source_partition.GetOriginalDecryptedSize();
+    auto gap = DecodeNKitV1Gap(
+        std::span<const u8>(*payload).subspan(static_cast<size_t>(source_cursor),
+                                             static_cast<size_t>(file.compacted_offset -
+                                                                 source_cursor)),
+        gap_options);
+    if (!gap)
+      return std::unexpected(gap.error());
+    u64 encoded_end = 0;
+    if (gap->ContainsJunkFile() ||
+        !CheckedAdd(source_cursor, gap->GetEncodedBytesConsumed(), &encoded_end) ||
+        encoded_end > file.compacted_offset ||
+        !std::all_of(payload->begin() + encoded_end,
+                     payload->begin() + file.compacted_offset,
+                     [](u8 byte) { return byte == 0; }))
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
+                                   source_partition.GetSourceDataOffset() + source_cursor,
+                                   partition_index));
+    }
+    std::vector<NKitV1SequentialSpan> gap_spans =
+        convert_gap_spans(gap->GetSpans(), true, file_index == 0);
+    partition.m_decrypted_spans.insert(partition.m_decrypted_spans.end(),
+                                       std::make_move_iterator(gap_spans.begin()),
+                                       std::make_move_iterator(gap_spans.end()));
+    if (!CheckedAdd(reconstructed_cursor, gap->GetReconstructedBytes(),
+                    &reconstructed_cursor) ||
+        reconstructed_cursor % 4 != 0)
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
+                                   source_partition.GetSourceDataOffset() + source_cursor,
+                                   partition_index));
+    }
+
+    NKitV1FstOffsetPatch patch;
+    patch.m_field_offset = file.field_offset;
+    patch.m_reconstructed_file_offset = reconstructed_cursor;
+    partition.m_fst_offset_patches.emplace_back(patch);
+
+    u64 compacted_end = 0;
+    u64 reconstructed_end = 0;
+    if (!CheckedAdd(file.compacted_offset, file.aligned_size, &compacted_end) ||
+        !CheckedAdd(reconstructed_cursor, file.aligned_size, &reconstructed_end) ||
+        compacted_end > payload->size() ||
+        reconstructed_end > source_partition.GetOriginalDecryptedSize())
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::InvalidRange,
+                                   source_partition.GetSourceDataOffset() + file.compacted_offset,
+                                   partition_index));
+    }
+    NKitV1SequentialSpan file_span;
+    file_span.m_address_space = NKitV1GapAddressSpace::PartitionDecryptedData;
+    file_span.m_reconstructed_offset = reconstructed_cursor;
+    file_span.m_length = file.aligned_size;
+    file_span.m_kind = NKitV1SequentialSpanKind::Source;
+    file_span.m_source_offset = source_partition.GetSourceDataOffset() + file.compacted_offset;
+    partition.m_decrypted_spans.emplace_back(std::move(file_span));
+    source_cursor = compacted_end;
+    reconstructed_cursor = reconstructed_end;
+  }
+
+  NKitV1GapDecodeOptions tail_options;
+  tail_options.address_space = NKitV1GapAddressSpace::PartitionDecryptedData;
+  tail_options.partition_index = partition_index;
+  tail_options.reconstructed_offset = reconstructed_cursor;
+  tail_options.encoded_source_offset = source_partition.GetSourceDataOffset() + source_cursor;
+  tail_options.maximum_reconstructed_size = source_partition.GetOriginalDecryptedSize();
+  auto partition_tail = DecodeNKitV1Gap(
+      std::span<const u8>(*payload).subspan(static_cast<size_t>(source_cursor)), tail_options);
+  if (!partition_tail || partition_tail->ContainsJunkFile())
+  {
+    return std::unexpected(partition_tail ? Error(NKitV1ErrorCode::UnsupportedGapContext,
+                                                  tail_options.encoded_source_offset,
+                                                  partition_index) :
+                                                partition_tail.error());
+  }
+  u64 reconstructed_data_end = 0;
+  if (!CheckedAdd(reconstructed_cursor, partition_tail->GetReconstructedBytes(),
+                  &reconstructed_data_end) ||
+      reconstructed_data_end != source_partition.GetOriginalDecryptedSize() ||
+      !CheckedAdd(source_cursor, partition_tail->GetEncodedBytesConsumed(), &source_cursor))
+  {
     return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
-                                 source_partition.GetSourceDataOffset() + hash_flags_end,
-                                 partition_index));
-  std::vector<NKitV1SequentialSpan> pre_file_spans =
-      convert_gap_spans(decoded_pre_file->GetSpans());
+                                 tail_options.encoded_source_offset, partition_index));
+  }
+  std::vector<NKitV1SequentialSpan> tail_spans =
+      convert_gap_spans(partition_tail->GetSpans(), true, true);
   partition.m_decrypted_spans.insert(partition.m_decrypted_spans.end(),
-                                     std::make_move_iterator(pre_file_spans.begin()),
-                                     std::make_move_iterator(pre_file_spans.end()));
-
-  if (!CheckedAdd(fst_end, decoded_pre_file->GetReconstructedBytes(),
-                  &partition.m_reconstructed_file_offset) ||
-      partition.m_reconstructed_file_offset % 4 != 0)
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
-                                 source_partition.GetSourceDataOffset() + hash_flags_end,
-                                 partition_index));
-  }
-
-  u64 compacted_file_end = 0;
-  u64 reconstructed_file_end = 0;
-  if (!CheckedAdd(compacted_file_offset, aligned_file_size, &compacted_file_end) ||
-      !CheckedAdd(partition.m_reconstructed_file_offset, aligned_file_size,
-                  &reconstructed_file_end) ||
-      compacted_file_end > payload.size() ||
-      reconstructed_file_end > source_partition.GetOriginalDecryptedSize())
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::InvalidRange,
-                                 source_partition.GetSourceDataOffset() + compacted_file_offset,
-                                 partition_index));
-  }
-
-  NKitV1SequentialSpan file_span;
-  file_span.m_address_space = NKitV1GapAddressSpace::PartitionDecryptedData;
-  file_span.m_reconstructed_offset = partition.m_reconstructed_file_offset;
-  file_span.m_length = aligned_file_size;
-  file_span.m_kind = NKitV1SequentialSpanKind::Source;
-  file_span.m_source_offset = source_partition.GetSourceDataOffset() + compacted_file_offset;
-  partition.m_decrypted_spans.emplace_back(std::move(file_span));
-
-  NKitV1GapDecodeOptions partition_tail_options;
-  partition_tail_options.address_space = NKitV1GapAddressSpace::PartitionDecryptedData;
-  partition_tail_options.partition_index = partition_index;
-  partition_tail_options.reconstructed_offset = reconstructed_file_end;
-  partition_tail_options.encoded_source_offset =
-      source_partition.GetSourceDataOffset() + compacted_file_end;
-  partition_tail_options.maximum_reconstructed_size = source_partition.GetOriginalDecryptedSize();
-  auto decoded_partition_tail = DecodeNKitV1Gap(
-      std::span<const u8>(payload).subspan(static_cast<size_t>(compacted_file_end)),
-      partition_tail_options);
-  if (!decoded_partition_tail)
-    return std::unexpected(decoded_partition_tail.error());
-  u64 reconstructed_partition_data_end = 0;
-  if (!CheckedAdd(reconstructed_file_end, decoded_partition_tail->GetReconstructedBytes(),
-                  &reconstructed_partition_data_end) ||
-      reconstructed_partition_data_end != source_partition.GetOriginalDecryptedSize())
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
-                                 source_partition.GetSourceDataOffset() + compacted_file_end,
-                                 partition_index));
-  }
-  std::vector<NKitV1SequentialSpan> partition_tail_spans =
-      convert_gap_spans(decoded_partition_tail->GetSpans());
-  partition.m_decrypted_spans.insert(partition.m_decrypted_spans.end(),
-                                     std::make_move_iterator(partition_tail_spans.begin()),
-                                     std::make_move_iterator(partition_tail_spans.end()));
-
-  u64 source_cursor = 0;
-  if (!CheckedAdd(compacted_file_end, decoded_partition_tail->GetEncodedBytesConsumed(),
-                  &source_cursor))
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
-                                 source_partition.GetSourceDataOffset() + compacted_file_end,
-                                 partition_index));
-  }
+                                     std::make_move_iterator(tail_spans.begin()),
+                                     std::make_move_iterator(tail_spans.end()));
+  auto coverage = ValidateSpanCoverage(partition.m_decrypted_spans,
+                                       partition.m_decrypted_data_size, partition_index);
+  if (!coverage)
+    return std::unexpected(coverage.error());
 
   u64 reconstructed_partition_end = 0;
   if (!CheckedAdd(reconstructed_partition_offset, PARTITION_HEADER_SIZE,
@@ -423,128 +658,88 @@ BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
     return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
                                  source_partition.GetSourceOffset(), partition_index));
   }
-
   NKitV1GapDecodeOptions disc_tail_options;
   disc_tail_options.address_space = NKitV1GapAddressSpace::Disc;
   disc_tail_options.reconstructed_offset = reconstructed_partition_end;
   disc_tail_options.encoded_source_offset = source_partition.GetSourceDataOffset() + source_cursor;
   disc_tail_options.maximum_reconstructed_size = foundation_plan.GetReconstructedSize();
-  auto decoded_disc_tail = DecodeNKitV1Gap(
-      std::span<const u8>(payload).subspan(static_cast<size_t>(source_cursor)), disc_tail_options);
-  if (!decoded_disc_tail)
-    return std::unexpected(decoded_disc_tail.error());
+  auto disc_tail = DecodeNKitV1Gap(
+      std::span<const u8>(*payload).subspan(static_cast<size_t>(source_cursor)),
+      disc_tail_options);
+  if (!disc_tail)
+    return std::unexpected(disc_tail.error());
   u64 reconstructed_disc_end = 0;
-  if (!CheckedAdd(reconstructed_partition_end, decoded_disc_tail->GetReconstructedBytes(),
+  if (!CheckedAdd(reconstructed_partition_end, disc_tail->GetReconstructedBytes(),
                   &reconstructed_disc_end) ||
-      reconstructed_disc_end != foundation_plan.GetReconstructedSize())
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
-                                 source_partition.GetSourceDataOffset() + source_cursor,
-                                 partition_index));
-  }
-  if (!CheckedAdd(source_cursor, decoded_disc_tail->GetEncodedBytesConsumed(), &source_cursor))
-    return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
-                                 source_partition.GetSourceDataOffset() + source_cursor,
-                                 partition_index));
-  if (!std::all_of(payload.begin() + source_cursor, payload.end(),
+      reconstructed_disc_end != foundation_plan.GetReconstructedSize() ||
+      !CheckedAdd(source_cursor, disc_tail->GetEncodedBytesConsumed(), &source_cursor) ||
+      !std::all_of(payload->begin() + source_cursor, payload->end(),
                    [](u8 byte) { return byte == 0; }))
   {
     return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
-                                 source_partition.GetSourceDataOffset() + source_cursor,
-                                 partition_index));
+                                 disc_tail_options.encoded_source_offset, partition_index));
   }
 
-  auto partition_junk_result = NKitV1JunkGenerator::Create(
-      partition.m_id, partition.m_disc_number, partition.m_decrypted_data_size);
-  if (!partition_junk_result)
-    return std::unexpected(partition_junk_result.error());
-
-  std::vector<std::array<u8, VolumeWii::BLOCK_DATA_SIZE>> decrypted(
-      VolumeWii::BLOCKS_PER_GROUP);
-  for (const NKitV1SequentialSpan& span : partition.m_decrypted_spans)
-  {
-    if (span.GetReconstructedOffset() > partition.m_decrypted_data_size ||
-        span.GetLength() > partition.m_decrypted_data_size - span.GetReconstructedOffset())
-    {
-      return std::unexpected(Error(NKitV1ErrorCode::InvalidRange, span.GetSourceOffset(),
-                                   partition_index));
-    }
-    u8* destination = reinterpret_cast<u8*>(decrypted.data()) + span.GetReconstructedOffset();
-    if (span.GetKind() == NKitV1SequentialSpanKind::Source)
-    {
-      if (!source.Read(span.GetSourceOffset(), span.GetLength(), destination))
-        return std::unexpected(
-            Error(NKitV1ErrorCode::ReadFailed, span.GetSourceOffset(), partition_index));
-    }
-    else if (span.GetKind() == NKitV1SequentialSpanKind::Fill)
-    {
-      std::fill_n(destination, static_cast<size_t>(span.GetLength()), span.GetFillByte());
-    }
-    else
-    {
-      auto generate_result = partition_junk_result->Generate(
-          span.GetReconstructedOffset(),
-          std::span<u8>(destination, static_cast<size_t>(span.GetLength())));
-      if (!generate_result)
-        return std::unexpected(generate_result.error());
-    }
-  }
-  u8* decrypted_bytes = reinterpret_cast<u8*>(decrypted.data());
-  std::fill_n(decrypted_bytes + INNER_METADATA_OFFSET, INNER_METADATA_SIZE, 0);
-  WriteBigEndianU32(std::span<u8>(decrypted_bytes, partition.m_decrypted_data_size),
-                    partition.m_fst_file_offset_field,
-                    static_cast<u32>(partition.m_reconstructed_file_offset / 4));
-
-  std::array<VolumeWii::HashBlock, VolumeWii::BLOCKS_PER_GROUP> hashes{};
-  if (!VolumeWii::HashGroup(decrypted.data(), hashes.data(), {}, true))
-    return std::unexpected(Error(NKitV1ErrorCode::IntegrityCheckFailed));
-  std::vector<u8> generated_h3(WII_PARTITION_H3_SIZE);
-  const Common::SHA1::Digest group_h3 = Common::SHA1::CalculateDigest(hashes[0].h2);
-  std::copy(group_h3.begin(), group_h3.end(), generated_h3.begin());
-
-  std::vector<u8>& partition_header = *partition_header_result;
   u64 data_offset = 0;
   u64 h3_offset = 0;
   u64 h3_end = 0;
-  if (!CheckedMultiply(ReadBigEndianU32(partition_header, PARTITION_DATA_OFFSET_FIELD), 4,
+  if (!CheckedMultiply(ReadBigEndianU32(*partition_header, PARTITION_DATA_OFFSET_FIELD), 4,
                        &data_offset) ||
-      !CheckedMultiply(ReadBigEndianU32(partition_header, WII_PARTITION_H3_OFFSET_ADDRESS), 4,
+      !CheckedMultiply(ReadBigEndianU32(*partition_header, WII_PARTITION_H3_OFFSET_ADDRESS), 4,
                        &h3_offset) ||
-      !CheckedAdd(h3_offset, WII_PARTITION_H3_SIZE, &h3_end))
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
-                                 source_partition.GetSourceOffset() + PARTITION_DATA_OFFSET_FIELD,
-                                 partition_index));
-  }
-  if (data_offset != PARTITION_HEADER_SIZE || h3_offset < 0x2c0 || h3_end > PARTITION_HEADER_SIZE)
+      !CheckedAdd(h3_offset, WII_PARTITION_H3_SIZE, &h3_end) ||
+      data_offset != PARTITION_HEADER_SIZE || h3_offset < 0x2c0 ||
+      h3_end > PARTITION_HEADER_SIZE)
   {
     return std::unexpected(Error(NKitV1ErrorCode::InvalidWiiGeometry,
                                  source_partition.GetSourceOffset() +
                                      WII_PARTITION_H3_OFFSET_ADDRESS,
                                  partition_index));
   }
+
+  std::vector<u8> generated_h3(WII_PARTITION_H3_SIZE);
+  for (u64 group = 0; group < group_count; ++group)
+  {
+    if (IsCancelled(cancellation_callback))
+      return std::unexpected(Error(NKitV1ErrorCode::Cancelled, group, partition_index));
+    auto decrypted = std::make_unique<std::array<
+        std::array<u8, VolumeWii::BLOCK_DATA_SIZE>, VolumeWii::BLOCKS_PER_GROUP>>();
+    auto materialized = MaterializeDecryptedGroup(source, partition, group, decrypted.get(),
+                                                  cancellation_callback);
+    if (!materialized)
+      return std::unexpected(materialized.error());
+    std::array<VolumeWii::HashBlock, VolumeWii::BLOCKS_PER_GROUP> hashes{};
+    const auto continue_hashing = [&](size_t) { return !IsCancelled(cancellation_callback); };
+    if (!VolumeWii::HashGroup(decrypted->data(), hashes.data(), continue_hashing, true))
+      return std::unexpected(Error(IsCancelled(cancellation_callback) ?
+                                       NKitV1ErrorCode::Cancelled :
+                                       NKitV1ErrorCode::IntegrityCheckFailed,
+                                   group, partition_index));
+    const Common::SHA1::Digest h3 = Common::SHA1::CalculateDigest(hashes[0].h2);
+    std::copy(h3.begin(), h3.end(), generated_h3.begin() + group * h3.size());
+  }
   if (!std::equal(generated_h3.begin(), generated_h3.end(),
-                  partition_header.begin() + h3_offset))
+                  partition_header->begin() + h3_offset))
   {
     return std::unexpected(Error(NKitV1ErrorCode::IntegrityCheckFailed,
                                  source_partition.GetSourceOffset() + h3_offset,
                                  partition_index));
   }
 
-  const u64 tmd_size = ReadBigEndianU32(partition_header, WII_PARTITION_TMD_SIZE_ADDRESS);
+  const u64 tmd_size = ReadBigEndianU32(*partition_header, WII_PARTITION_TMD_SIZE_ADDRESS);
   u64 tmd_offset = 0;
   u64 tmd_end = 0;
-  if (!CheckedMultiply(ReadBigEndianU32(partition_header, WII_PARTITION_TMD_OFFSET_ADDRESS), 4,
+  if (!CheckedMultiply(ReadBigEndianU32(*partition_header, WII_PARTITION_TMD_OFFSET_ADDRESS), 4,
                        &tmd_offset) ||
-      !CheckedAdd(tmd_offset, tmd_size, &tmd_end) || tmd_end > partition_header.size())
+      !CheckedAdd(tmd_offset, tmd_size, &tmd_end) || tmd_end > partition_header->size())
   {
     return std::unexpected(Error(NKitV1ErrorCode::InvalidWiiGeometry,
                                  source_partition.GetSourceOffset() +
                                      WII_PARTITION_TMD_OFFSET_ADDRESS,
                                  partition_index));
   }
-  IOS::ES::TMDReader tmd(std::vector<u8>(partition_header.begin() + tmd_offset,
-                                         partition_header.begin() + tmd_end));
+  IOS::ES::TMDReader tmd(std::vector<u8>(partition_header->begin() + tmd_offset,
+                                         partition_header->begin() + tmd_end));
   const std::vector<IOS::ES::Content> contents = tmd.GetContents();
   if (!tmd.IsValid() || contents.size() != 1 ||
       contents[0].sha1 != Common::SHA1::CalculateDigest(generated_h3))
@@ -554,11 +749,11 @@ BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
                                  partition_index));
   }
 
-  WriteBigEndianU32(partition_header, PARTITION_DATA_SIZE_FIELD,
+  WriteBigEndianU32(*partition_header, PARTITION_DATA_SIZE_FIELD,
                     static_cast<u32>(source_partition.GetOriginalRawSize() / 4));
-  std::copy(generated_h3.begin(), generated_h3.end(), partition_header.begin() + h3_offset);
+  std::copy(generated_h3.begin(), generated_h3.end(), partition_header->begin() + h3_offset);
   partition.m_h3_offset = h3_offset;
-  partition.m_reconstructed_header = std::move(partition_header);
+  partition.m_reconstructed_header = std::move(*partition_header);
 
   NKitV1SequentialReconstructionPlan plan(foundation_plan, std::move(partition));
   plan.m_reconstructed_disc_header = foundation_plan.GetNormalizedHeader();
@@ -571,7 +766,8 @@ BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
         Error(NKitV1ErrorCode::InvalidPartitionTable, table_descriptor, partition_index));
   }
   u64 table_offset = 0;
-  if (!CheckedMultiply(ReadBigEndianU32(plan.m_reconstructed_disc_header, table_descriptor + 4),
+  if (!CheckedMultiply(ReadBigEndianU32(plan.m_reconstructed_disc_header,
+                                        table_descriptor + 4),
                        4, &table_offset) ||
       table_offset + 8 > plan.m_reconstructed_disc_header.size() ||
       reconstructed_partition_offset / 4 > std::numeric_limits<u32>::max())
@@ -581,9 +777,71 @@ BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
   }
   WriteBigEndianU32(plan.m_reconstructed_disc_header, static_cast<size_t>(table_offset),
                     static_cast<u32>(reconstructed_partition_offset / 4));
-  plan.m_disc_spans_before_partition = convert_gap_spans(decoded_prefix->GetSpans());
-  plan.m_disc_spans_after_partition = convert_gap_spans(decoded_disc_tail->GetSpans());
+  plan.m_disc_spans_before_partition =
+      convert_gap_spans(decoded_prefix->GetSpans(), false, true);
+  plan.m_disc_spans_after_partition = convert_gap_spans(disc_tail->GetSpans(), false, true);
   return plan;
+}
+
+NKitV1Result<void>
+ValidateWiiNKitV1SequentialSource(BlobReader& source,
+                                  const NKitV1SequentialReconstructionPlan& plan)
+{
+  return ValidateSource(source, plan);
+}
+
+NKitV1Result<void> ReconstructWiiNKitV1PartitionGroup(
+    BlobReader& source, const NKitV1SequentialReconstructionPlan& plan, u64 group_index,
+    std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>* encrypted,
+    const std::function<bool()>& cancellation_callback)
+{
+  constexpr u32 partition_index = 0;
+  if (!encrypted)
+    return std::unexpected(Error(NKitV1ErrorCode::InvalidRange, group_index, partition_index));
+  const NKitV1SequentialPartition& partition = plan.GetPartition();
+  auto decrypted = std::make_unique<std::array<
+      std::array<u8, VolumeWii::BLOCK_DATA_SIZE>, VolumeWii::BLOCKS_PER_GROUP>>();
+  auto materialized = MaterializeDecryptedGroup(source, partition, group_index, decrypted.get(),
+                                                cancellation_callback);
+  if (!materialized)
+    return std::unexpected(materialized.error());
+
+  std::array<VolumeWii::HashBlock, VolumeWii::BLOCKS_PER_GROUP> hashes{};
+  const auto continue_hashing = [&](size_t) { return !IsCancelled(cancellation_callback); };
+  if (!VolumeWii::HashGroup(decrypted->data(), hashes.data(), continue_hashing, true))
+  {
+    return std::unexpected(Error(IsCancelled(cancellation_callback) ?
+                                     NKitV1ErrorCode::Cancelled :
+                                     NKitV1ErrorCode::IntegrityCheckFailed,
+                                 group_index, partition_index));
+  }
+  const Common::SHA1::Digest h3 = Common::SHA1::CalculateDigest(hashes[0].h2);
+  const u64 h3_position = partition.GetH3Offset() + group_index * h3.size();
+  if (h3_position + h3.size() > partition.GetReconstructedHeader().size() ||
+      !std::equal(h3.begin(), h3.end(),
+                  partition.GetReconstructedHeader().begin() + h3_position))
+  {
+    return std::unexpected(Error(NKitV1ErrorCode::SourceIdentityMismatch, group_index,
+                                 partition_index));
+  }
+
+  IOS::ES::TicketReader ticket(std::vector<u8>(
+      partition.GetReconstructedHeader().begin(),
+      partition.GetReconstructedHeader().begin() + WII_PARTITION_TICKET_SIZE));
+  if (!ticket.IsValid())
+    return std::unexpected(Error(NKitV1ErrorCode::IntegrityCheckFailed,
+                                 partition.GetSourceOffset(), partition_index));
+  const std::array<u8, VolumeWii::AES_KEY_SIZE> title_key = ticket.GetTitleKey();
+  if (IsCancelled(cancellation_callback))
+    return std::unexpected(Error(NKitV1ErrorCode::Cancelled, group_index, partition_index));
+  if (!VolumeWii::EncryptGroup(decrypted->data(), title_key, encrypted, {}, true))
+  {
+    return std::unexpected(Error(IsCancelled(cancellation_callback) ?
+                                     NKitV1ErrorCode::Cancelled :
+                                     NKitV1ErrorCode::IntegrityCheckFailed,
+                                 group_index, partition_index));
+  }
+  return {};
 }
 
 NKitV1Result<NKitV1SequentialReconstructionResult>
@@ -592,79 +850,14 @@ ReconstructWiiNKitV1Sequential(BlobReader& source,
                                 NKitV1SequentialOutput& output,
                                 const std::function<bool()>& cancellation_callback)
 {
-  constexpr u32 partition_index = 0;
-  const NKitV1Metadata& metadata = plan.GetFoundationPlan().GetMetadata();
-  if (source.GetBlobType() != metadata.GetSourceBlobType() ||
-      source.GetDataSizeType() != DataSizeType::Accurate ||
-      source.GetDataSize() != metadata.GetSourceLogicalSize() ||
-      source.GetRawSize() != metadata.GetSourceRawSize())
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout));
-  }
-  auto source_header_result = ReadBounded(source, 0, WII_NKIT_V1_HEADER_SIZE,
-                                          WII_NKIT_V1_HEADER_SIZE);
-  if (!source_header_result)
-    return std::unexpected(source_header_result.error());
-  if (Common::SHA1::CalculateDigest(*source_header_result) !=
-      plan.GetFoundationPlan().GetSourceHeaderFingerprint())
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout));
-  }
+  auto identity = ValidateSource(source, plan);
+  if (!identity)
+    return std::unexpected(identity.error());
   if (IsCancelled(cancellation_callback))
     return std::unexpected(Error(NKitV1ErrorCode::Cancelled));
 
-  const NKitV1SequentialPartition& partition = plan.GetPartition();
-  auto partition_junk_result = NKitV1JunkGenerator::Create(
-      partition.GetId(), partition.GetDiscNumber(), partition.GetDecryptedDataSize());
-  if (!partition_junk_result)
-    return std::unexpected(partition_junk_result.error());
-
-  std::vector<std::array<u8, VolumeWii::BLOCK_DATA_SIZE>> decrypted(
-      VolumeWii::BLOCKS_PER_GROUP);
-  for (const NKitV1SequentialSpan& span : partition.GetDecryptedSpans())
-  {
-    if (IsCancelled(cancellation_callback))
-      return std::unexpected(Error(NKitV1ErrorCode::Cancelled, span.GetSourceOffset(),
-                                   partition_index));
-    u8* destination = reinterpret_cast<u8*>(decrypted.data()) + span.GetReconstructedOffset();
-    if (span.GetKind() == NKitV1SequentialSpanKind::Source)
-    {
-      if (!source.Read(span.GetSourceOffset(), span.GetLength(), destination))
-        return std::unexpected(
-            Error(NKitV1ErrorCode::ReadFailed, span.GetSourceOffset(), partition_index));
-    }
-    else if (span.GetKind() == NKitV1SequentialSpanKind::Fill)
-    {
-      std::fill_n(destination, static_cast<size_t>(span.GetLength()), span.GetFillByte());
-    }
-    else
-    {
-      auto generate_result = partition_junk_result->Generate(
-          span.GetReconstructedOffset(),
-          std::span<u8>(destination, static_cast<size_t>(span.GetLength())));
-      if (!generate_result)
-        return std::unexpected(generate_result.error());
-    }
-  }
-  u8* decrypted_bytes = reinterpret_cast<u8*>(decrypted.data());
-  std::fill_n(decrypted_bytes + INNER_METADATA_OFFSET, INNER_METADATA_SIZE, 0);
-  WriteBigEndianU32(std::span<u8>(decrypted_bytes, partition.GetDecryptedDataSize()),
-                    partition.m_fst_file_offset_field,
-                    static_cast<u32>(partition.m_reconstructed_file_offset / 4));
-
-  IOS::ES::TicketReader ticket(std::vector<u8>(partition.GetReconstructedHeader().begin(),
-                                                partition.GetReconstructedHeader().begin() +
-                                                    WII_PARTITION_TICKET_SIZE));
-  if (!ticket.IsValid())
-    return std::unexpected(Error(NKitV1ErrorCode::IntegrityCheckFailed,
-                                 partition.GetSourceOffset(), partition_index));
-  const std::array<u8, VolumeWii::AES_KEY_SIZE> title_key = ticket.GetTitleKey();
-  std::array<u8, VolumeWii::GROUP_TOTAL_SIZE> encrypted{};
-  if (!VolumeWii::EncryptGroup(decrypted.data(), title_key, &encrypted, {}, true))
-    return std::unexpected(Error(NKitV1ErrorCode::IntegrityCheckFailed));
-
   NKitV1SequentialReconstructionResult result;
-  result.maximum_working_bytes = decrypted.size() * sizeof(decrypted[0]) + encrypted.size() +
+  result.maximum_working_bytes = VolumeWii::GROUP_DATA_SIZE + VolumeWii::GROUP_TOTAL_SIZE +
                                  VolumeWii::BLOCKS_PER_GROUP * sizeof(VolumeWii::HashBlock) +
                                  IO_CHUNK_SIZE;
 
@@ -689,13 +882,13 @@ ReconstructWiiNKitV1Sequential(BlobReader& source,
   const auto write_disc_spans = [&](std::span<const NKitV1SequentialSpan> spans)
       -> NKitV1Result<void> {
     std::array<u8, IO_CHUNK_SIZE> buffer{};
-    auto disc_junk_result = NKitV1JunkGenerator::Create(
+    const NKitV1Metadata& metadata = plan.GetFoundationPlan().GetMetadata();
+    auto junk = NKitV1JunkGenerator::Create(
         {metadata.GetGameId()[0], metadata.GetGameId()[1], metadata.GetGameId()[2],
          metadata.GetGameId()[3]},
         metadata.GetDiscNumber(), metadata.GetOriginalSize());
-    if (!disc_junk_result)
-      return std::unexpected(disc_junk_result.error());
-
+    if (!junk)
+      return std::unexpected(junk.error());
     for (const NKitV1SequentialSpan& span : spans)
     {
       if (span.GetReconstructedOffset() != result.bytes_written)
@@ -708,7 +901,6 @@ ReconstructWiiNKitV1Sequential(BlobReader& source,
           return std::unexpected(zero_result.error());
         continue;
       }
-
       u64 completed = 0;
       while (completed < span.GetLength())
       {
@@ -726,11 +918,10 @@ ReconstructWiiNKitV1Sequential(BlobReader& source,
         }
         else
         {
-          auto generate_result = disc_junk_result->Generate(
-              span.GetReconstructedOffset() + completed,
-              std::span<u8>(buffer.data(), chunk));
-          if (!generate_result)
-            return std::unexpected(generate_result.error());
+          auto generated = junk->Generate(span.GetReconstructedOffset() + completed,
+                                          std::span<u8>(buffer.data(), chunk));
+          if (!generated)
+            return std::unexpected(generated.error());
         }
         auto write_result = write(std::span<const u8>(buffer.data(), chunk));
         if (!write_result)
@@ -747,24 +938,35 @@ ReconstructWiiNKitV1Sequential(BlobReader& source,
   auto prefix_result = write_disc_spans(plan.GetDiscSpansBeforePartition());
   if (!prefix_result)
     return std::unexpected(prefix_result.error());
+  const NKitV1SequentialPartition& partition = plan.GetPartition();
   if (result.bytes_written != partition.GetReconstructedOffset())
-    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout, result.bytes_written));
+    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
+                                 result.bytes_written));
   write_result = write(partition.GetReconstructedHeader());
   if (!write_result)
     return std::unexpected(write_result.error());
-  for (size_t block = 0; block < VolumeWii::BLOCKS_PER_GROUP; ++block)
+  for (u64 group = 0; group < partition.GetGroupCount(); ++group)
   {
-    write_result = write(std::span<const u8>(encrypted).subspan(
-        block * VolumeWii::BLOCK_TOTAL_SIZE, VolumeWii::BLOCK_TOTAL_SIZE));
-    if (!write_result)
-      return std::unexpected(write_result.error());
+    auto encrypted = std::make_unique<std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>>();
+    auto reconstructed = ReconstructWiiNKitV1PartitionGroup(
+        source, plan, group, encrypted.get(), cancellation_callback);
+    if (!reconstructed)
+      return std::unexpected(reconstructed.error());
+    for (size_t offset = 0; offset < encrypted->size(); offset += IO_CHUNK_SIZE)
+    {
+      const size_t size = std::min(IO_CHUNK_SIZE, encrypted->size() - offset);
+      write_result = write(std::span<const u8>(encrypted->data() + offset, size));
+      if (!write_result)
+        return std::unexpected(write_result.error());
+    }
+    ++result.groups_reconstructed;
   }
-  result.groups_reconstructed = 1;
   auto tail_result = write_disc_spans(plan.GetDiscSpansAfterPartition());
   if (!tail_result)
     return std::unexpected(tail_result.error());
   if (result.bytes_written != plan.GetFoundationPlan().GetReconstructedSize())
-    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout, result.bytes_written));
+    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
+                                 result.bytes_written));
   return result;
 }
 

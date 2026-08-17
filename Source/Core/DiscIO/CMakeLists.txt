@@ -36,6 +36,8 @@ add_library(discio
   NKitV1.h
   NKitV1Reconstruction.cpp
   NKitV1Reconstruction.h
+  NKitV1ReconstructedBlob.cpp
+  NKitV1ReconstructedBlob.h
   NKitV1SequentialReconstructor.cpp
   NKitV1SequentialReconstructor.h
   RiivolutionParser.cpp

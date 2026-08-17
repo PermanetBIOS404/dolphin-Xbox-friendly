@@ -37,8 +37,9 @@ public:
 
 private:
   friend NKitV1Result<class NKitV1SequentialReconstructionPlan>
-  BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
-                                              const NKitV1ReconstructionPlan& foundation_plan);
+  BuildWiiNKitV1SequentialReconstructionPlan(
+      BlobReader& source, const NKitV1ReconstructionPlan& foundation_plan,
+      const std::function<bool()>& cancellation_callback);
 
   NKitV1SequentialSpan() = default;
 
@@ -48,6 +49,22 @@ private:
   NKitV1SequentialSpanKind m_kind = NKitV1SequentialSpanKind::Source;
   u64 m_source_offset = 0;
   u8 m_fill_byte = 0;
+};
+
+class NKitV1FstOffsetPatch final
+{
+public:
+  u64 GetFieldOffset() const { return m_field_offset; }
+  u64 GetReconstructedFileOffset() const { return m_reconstructed_file_offset; }
+
+private:
+  friend NKitV1Result<class NKitV1SequentialReconstructionPlan>
+  BuildWiiNKitV1SequentialReconstructionPlan(
+      BlobReader& source, const NKitV1ReconstructionPlan& foundation_plan,
+      const std::function<bool()>& cancellation_callback);
+
+  u64 m_field_offset = 0;
+  u64 m_reconstructed_file_offset = 0;
 };
 
 class NKitV1SequentialPartition final
@@ -66,11 +83,17 @@ public:
   }
   const std::array<u8, 4>& GetId() const { return m_id; }
   u8 GetDiscNumber() const { return m_disc_number; }
+  u64 GetGroupCount() const { return m_raw_data_size / VolumeWii::GROUP_TOTAL_SIZE; }
+  const std::vector<NKitV1FstOffsetPatch>& GetFstOffsetPatches() const
+  {
+    return m_fst_offset_patches;
+  }
 
 private:
   friend NKitV1Result<class NKitV1SequentialReconstructionPlan>
-  BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
-                                              const NKitV1ReconstructionPlan& foundation_plan);
+  BuildWiiNKitV1SequentialReconstructionPlan(
+      BlobReader& source, const NKitV1ReconstructionPlan& foundation_plan,
+      const std::function<bool()>& cancellation_callback);
   friend NKitV1Result<class NKitV1SequentialReconstructionResult>
   ReconstructWiiNKitV1Sequential(BlobReader& source,
                                   const class NKitV1SequentialReconstructionPlan& plan,
@@ -85,10 +108,9 @@ private:
   u64 m_raw_data_size = 0;
   u64 m_decrypted_data_size = 0;
   u64 m_h3_offset = 0;
-  u64 m_fst_file_offset_field = 0;
-  u64 m_reconstructed_file_offset = 0;
   std::vector<u8> m_reconstructed_header;
   std::vector<NKitV1SequentialSpan> m_decrypted_spans;
+  std::vector<NKitV1FstOffsetPatch> m_fst_offset_patches;
   std::array<u8, 4> m_id{};
   u8 m_disc_number = 0;
 };
@@ -116,8 +138,9 @@ public:
 
 private:
   friend NKitV1Result<NKitV1SequentialReconstructionPlan>
-  BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
-                                              const NKitV1ReconstructionPlan& foundation_plan);
+  BuildWiiNKitV1SequentialReconstructionPlan(
+      BlobReader& source, const NKitV1ReconstructionPlan& foundation_plan,
+      const std::function<bool()>& cancellation_callback);
 
   NKitV1SequentialReconstructionPlan(NKitV1ReconstructionPlan foundation_plan,
                                       NKitV1SequentialPartition partition)
@@ -150,12 +173,27 @@ struct NKitV1SequentialReconstructionResult final
   u64 groups_reconstructed = 0;
 };
 
-// N3 deliberately supports one normal-hash data partition, one raw 64-cluster group, one regular
-// FST file, no exceptional preserved hashes, and no external recovery requirement. This is a real
-// v1-shaped proof subset, not the final compatibility claim.
+// The N4 production subset supports one normal-hash data partition, multiple complete raw
+// 64-cluster groups, root-level regular FST files, canonical leading-null gap context, no
+// exceptional preserved hashes, and no external recovery requirement. It remains a conservative
+// v1 subset.
 NKitV1Result<NKitV1SequentialReconstructionPlan>
-BuildWiiNKitV1SequentialReconstructionPlan(BlobReader& source,
-                                            const NKitV1ReconstructionPlan& foundation_plan);
+BuildWiiNKitV1SequentialReconstructionPlan(
+    BlobReader& source, const NKitV1ReconstructionPlan& foundation_plan,
+    const std::function<bool()>& cancellation_callback = {});
+
+// Revalidates the bounded source identity captured by N2/N3. Payload mutations encountered while
+// producing a group are additionally detected by that group's H3 relationship.
+NKitV1Result<void>
+ValidateWiiNKitV1SequentialSource(BlobReader& source,
+                                  const NKitV1SequentialReconstructionPlan& plan);
+
+// Reconstructs one encrypted conventional 2 MiB partition group. The caller owns the bounded
+// output buffer, making this the shared transform for sequential and random-access readers.
+NKitV1Result<void> ReconstructWiiNKitV1PartitionGroup(
+    BlobReader& source, const NKitV1SequentialReconstructionPlan& plan, u64 group_index,
+    std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>* encrypted,
+    const std::function<bool()>& cancellation_callback = {});
 
 NKitV1Result<NKitV1SequentialReconstructionResult>
 ReconstructWiiNKitV1Sequential(BlobReader& source,
