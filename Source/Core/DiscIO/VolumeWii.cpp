@@ -507,8 +507,36 @@ bool VolumeWii::CheckBlockIntegrity(u64 block_index, const Partition& partition)
 
 bool VolumeWii::HashGroup(const std::array<u8, BLOCK_DATA_SIZE> in[BLOCKS_PER_GROUP],
                           HashBlock out[BLOCKS_PER_GROUP],
-                          const std::function<bool(size_t block)>& read_function)
+                          const std::function<bool(size_t block)>& read_function,
+                          bool single_threaded)
 {
+  if (single_threaded)
+  {
+    for (size_t i = 0; i < BLOCKS_PER_GROUP; ++i)
+    {
+      if (read_function && !read_function(i))
+        return false;
+
+      out[i] = {};
+      for (size_t j = 0; j < 31; ++j)
+        out[i].h0[j] = Common::SHA1::CalculateDigest(in[i].data() + j * 0x400, 0x400);
+    }
+
+    for (size_t group = 0; group < 8; ++group)
+    {
+      HashBlock& first = out[group * 8];
+      for (size_t block = 0; block < 8; ++block)
+        first.h1[block] = Common::SHA1::CalculateDigest(out[group * 8 + block].h0);
+      for (size_t block = 1; block < 8; ++block)
+        out[group * 8 + block].h1 = first.h1;
+      out[0].h2[group] = Common::SHA1::CalculateDigest(first.h1);
+    }
+
+    for (size_t i = 1; i < BLOCKS_PER_GROUP; ++i)
+      out[i].h2 = out[0].h2;
+    return true;
+  }
+
   std::array<std::future<void>, BLOCKS_PER_GROUP> hash_futures;
   bool success = true;
 
@@ -576,11 +604,72 @@ bool VolumeWii::HashGroup(const std::array<u8, BLOCK_DATA_SIZE> in[BLOCKS_PER_GR
   return success;
 }
 
+namespace
+{
+bool EncryptMaterializedGroup(
+    const std::array<u8, VolumeWii::BLOCK_DATA_SIZE> in[VolumeWii::BLOCKS_PER_GROUP],
+    const VolumeWii::HashBlock hashes[VolumeWii::BLOCKS_PER_GROUP],
+    const std::array<u8, VolumeWii::AES_KEY_SIZE>& key,
+    std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>* out, bool single_threaded)
+{
+  const unsigned int threads = single_threaded ?
+                                   1 :
+                                   std::min(VolumeWii::BLOCKS_PER_GROUP,
+                                            std::max<unsigned int>(
+                                                1, std::thread::hardware_concurrency()));
+
+  std::vector<std::future<void>> encryption_futures(threads);
+  auto aes_context = Common::AES::CreateContextEncrypt(key.data());
+
+  const auto encrypt_range = [&in, &hashes, &aes_context, &out](size_t start, size_t end) {
+    for (size_t j = start; j < end; ++j)
+    {
+      u8* out_ptr = out->data() + j * VolumeWii::BLOCK_TOTAL_SIZE;
+      aes_context->CryptIvZero(reinterpret_cast<const u8*>(&hashes[j]), out_ptr,
+                               VolumeWii::BLOCK_HEADER_SIZE);
+      aes_context->Crypt(out_ptr + 0x3D0, in[j].data(),
+                         out_ptr + VolumeWii::BLOCK_HEADER_SIZE, VolumeWii::BLOCK_DATA_SIZE);
+    }
+  };
+  if (threads == 1)
+  {
+    encrypt_range(0, VolumeWii::BLOCKS_PER_GROUP);
+    return true;
+  }
+
+  for (size_t i = 0; i < threads; ++i)
+  {
+    encryption_futures[i] =
+        std::async(std::launch::async, encrypt_range, i * VolumeWii::BLOCKS_PER_GROUP / threads,
+                   (i + 1) * VolumeWii::BLOCKS_PER_GROUP / threads);
+  }
+
+  for (std::future<void>& future : encryption_futures)
+    future.get();
+  return true;
+}
+}  // namespace
+
+bool VolumeWii::EncryptGroup(
+    const std::array<u8, BLOCK_DATA_SIZE> in[BLOCKS_PER_GROUP],
+    const std::array<u8, AES_KEY_SIZE>& key, std::array<u8, GROUP_TOTAL_SIZE>* out,
+    const std::function<void(HashBlock hash_blocks[BLOCKS_PER_GROUP])>& hash_exception_callback,
+    bool single_threaded)
+{
+  std::array<HashBlock, BLOCKS_PER_GROUP> hashes{};
+  if (!HashGroup(in, hashes.data(), {}, single_threaded))
+    return false;
+  if (hash_exception_callback)
+    hash_exception_callback(hashes.data());
+  return EncryptMaterializedGroup(in, hashes.data(), key, out, single_threaded);
+}
+
 bool VolumeWii::EncryptGroup(
     u64 offset, u64 partition_data_offset, u64 partition_data_decrypted_size,
     const std::array<u8, AES_KEY_SIZE>& key, BlobReader* blob,
     std::array<u8, GROUP_TOTAL_SIZE>* out,
-    const std::function<void(HashBlock hash_blocks[BLOCKS_PER_GROUP])>& hash_exception_callback)
+    const std::function<void(HashBlock hash_blocks[BLOCKS_PER_GROUP])>& hash_exception_callback,
+    bool single_threaded)
 {
   std::vector<std::array<u8, BLOCK_DATA_SIZE>> unencrypted_data(BLOCKS_PER_GROUP);
   std::vector<HashBlock> unencrypted_hashes(BLOCKS_PER_GROUP);
@@ -600,7 +689,7 @@ bool VolumeWii::EncryptGroup(
           unencrypted_data[block].fill(0);
         }
         return true;
-      });
+      }, single_threaded);
 
   if (!success)
     return false;
@@ -608,36 +697,8 @@ bool VolumeWii::EncryptGroup(
   if (hash_exception_callback)
     hash_exception_callback(unencrypted_hashes.data());
 
-  const unsigned int threads =
-      std::min(BLOCKS_PER_GROUP, std::max<unsigned int>(1, std::thread::hardware_concurrency()));
-
-  std::vector<std::future<void>> encryption_futures(threads);
-
-  auto aes_context = Common::AES::CreateContextEncrypt(key.data());
-
-  for (size_t i = 0; i < threads; ++i)
-  {
-    encryption_futures[i] = std::async(
-        std::launch::async,
-        [&unencrypted_data, &unencrypted_hashes, &aes_context, &out](size_t start, size_t end) {
-          for (size_t j = start; j < end; ++j)
-          {
-            u8* out_ptr = out->data() + j * BLOCK_TOTAL_SIZE;
-
-            aes_context->CryptIvZero(reinterpret_cast<u8*>(&unencrypted_hashes[j]), out_ptr,
-                                     BLOCK_HEADER_SIZE);
-
-            aes_context->Crypt(out_ptr + 0x3D0, unencrypted_data[j].data(),
-                               out_ptr + BLOCK_HEADER_SIZE, BLOCK_DATA_SIZE);
-          }
-        },
-        i * BLOCKS_PER_GROUP / threads, (i + 1) * BLOCKS_PER_GROUP / threads);
-  }
-
-  for (std::future<void>& future : encryption_futures)
-    future.get();
-
-  return true;
+  return EncryptMaterializedGroup(unencrypted_data.data(), unencrypted_hashes.data(), key, out,
+                                  single_threaded);
 }
 
 void VolumeWii::DecryptBlockHashes(const u8* in, HashBlock* out, Common::AES::Context* aes_context)

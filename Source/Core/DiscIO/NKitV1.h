@@ -52,6 +52,10 @@ enum class NKitV1ErrorCode
   InvalidWiiGeometry,
   ExternalRecoveryRequired,
   UnsupportedReconstructionFeature,
+  InvalidSequentialLayout,
+  IntegrityCheckFailed,
+  OutputWriteFailed,
+  Cancelled,
 };
 
 struct NKitV1Error final

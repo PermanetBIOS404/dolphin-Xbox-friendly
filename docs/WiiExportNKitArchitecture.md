@@ -887,3 +887,145 @@ details without changing the architecture: top-level bytes `0x214..0x217` remain
 opaque because the v1 reader/writer does not require stronger semantics here, and Dolphin's
 existing lagged-Fibonacci implementation can safely supply the recurrence after NKit-specific seed
 derivation.
+
+## 16. N3 implementation status
+
+N3 adds the first complete synthetic conventional-Wii reconstruction proof on branch
+`feature/wii-export-n3-nkit-reconstruction-proof`, based exactly on N2 commit
+`9ecee0a966e322f8cf73b0a971dcee470d30a7f9`. It remains a DiscIO proof component: it neither
+advertises NKit as an export input nor connects reconstruction to `AnalyzeWbfs`, `WriteWbfs`,
+`ExecuteWiiExport`, or DolphinQt.
+
+### Production and test files
+
+The production implementation is in:
+
+* `Source/Core/DiscIO/NKitV1SequentialReconstructor.h`
+* `Source/Core/DiscIO/NKitV1SequentialReconstructor.cpp`
+* `Source/Core/DiscIO/NKitV1.h`
+* `Source/Core/DiscIO/VolumeWii.h`
+* `Source/Core/DiscIO/VolumeWii.cpp`
+* `Source/Core/DiscIO/CMakeLists.txt`
+* `Source/Core/DolphinLib.props`
+
+Legal synthetic coverage is entirely programmatic in
+`Source/UnitTests/Core/NKitV1SequentialReconstructorTest.cpp`, registered by
+`Source/UnitTests/Core/CMakeLists.txt`. No binary fixture, Nintendo asset, title-derived key, real
+disc image, or recovery file is stored or opened.
+
+### Sequential reconstruction architecture
+
+`BuildWiiNKitV1SequentialReconstructionPlan` consumes the immutable N2 plan plus the same
+read-only `BlobReader`. It completes a bounded validation scan before any output is published and
+returns a getter-only `NKitV1SequentialReconstructionPlan`. Its disc and decrypted-partition
+instructions are immutable `NKitV1SequentialSpan` values of kind source, fill, or deterministic
+junk. `NKitV1SequentialPartition` holds the validated remapping, rebuilt partition header, and
+decrypted group instructions.
+
+`ReconstructWiiNKitV1Sequential` rechecks source type, sizes, and the N2 fixed-header fingerprint,
+then sends monotonically increasing bytes to `NKitV1SequentialOutput::Write` or the semantically
+equivalent `WriteZeros`. The latter lets a test file sink create a sparse zero tail without a disc-
+sized allocation. The result reports output bytes, groups rebuilt, and the bounded working-set
+estimate. A cancellation callback is checked before group materialization, between input spans,
+and before each output operation. Output, cancellation, integrity, and layout failures use the N2
+typed-error channel.
+
+The N3 subset fixes its working set to one decrypted 64-cluster group, one encrypted raw group,
+the partition hash material, and a 64 KiB disc-span buffer: less than 5 MiB in the focused proof.
+Source-controlled compacted payload, FST, file, and prefix sizes are capped before allocation;
+every offset addition, multiplication, decoded range, and output boundary is checked. Large zero
+regions are never materialized.
+
+### Supported N3 subset and remapping
+
+The proof accepts exactly one represented data partition with no external recovery requirement,
+one conventional `0x200000`-byte raw group (`64 * 0x8000`) representing `0x1f0000` decrypted
+bytes (`64 * 0x7c00`), one root FST plus one regular file, and ordinary regenerated hashes. The
+four-byte v1 exceptional-hash flags must all be zero. Multiple groups/files/partitions, preserved
+hash exceptions, canonical filesystem-driven gap variants, removed update partitions, and
+external recovery are explicitly rejected as unsupported or recovery-required.
+
+The scanner decodes the compact disc prefix to derive the conventional partition offset, rewrites
+the corresponding conventional partition-table entry in the N2 normalized `0x50000` header, and
+restores the conventional partition data offset/size. Within decrypted partition data it copies
+the header/FST prefix, clears the inner `0x200..0x21b` NKit metadata, restores the FST file offset,
+decodes the pre-file and post-file gaps, and copies the aligned file bytes. The partition header's
+H3 table is regenerated and its data-size field is restored before output.
+
+### Raw groups, hashes, and encryption
+
+N3 reuses Dolphin's authoritative `VolumeWii::HashGroup` H0/H1/H2 implementation and
+`Common::SHA1` for H3 and the TMD content digest. For the single supported group, each conventional
+raw cluster is rebuilt as the encrypted `0x400`-byte hash area followed by the encrypted
+`0x7c00`-byte payload, for a `0x8000`-byte cluster. The group H3 is SHA-1 over H2; the remainder of
+the fixed H3 table is zero in this one-group fixture. Planning independently verifies the generated
+H3 table against the compact partition header and verifies the TMD content digest before output.
+
+`VolumeWii::EncryptGroup` now also accepts an already-materialized decrypted group and an optional
+single-threaded mode. Its default blob-backed behavior is preserved. N3 selects that bounded mode
+so its resource bound is independent of host CPU count; both paths reuse Dolphin's AES context, conventional hash-
+area zero-IV encryption, and payload IV at raw-header offset `0x3d0`. A synthetic title key is
+wrapped into the synthetic ticket at test runtime through Dolphin's existing IOSC and recovered by
+the normal `TicketReader` path. No Wii key bytes are added by N3.
+
+### Independent synthetic oracle and NKit fixture
+
+`BuildSyntheticConventionalWiiDisc` constructs a sparse, legal single-layer Wii byte oracle with
+invented ID `RN3P01`, one data partition, a synthetic ticket/TMD, a minimal DOL/FST, and
+`proof.bin` containing fixed invented bytes. It independently lays out the decrypted group,
+generates H0/H1/H2/H3, encrypts all 64 raw clusters, and retains every meaningful conventional byte
+through the partition end; the remaining conventional disc tail is defined as zero without being
+allocated.
+
+The test-only `BuildSyntheticNKitV1Fixture` starts from normal DiscIO decrypted reads of that
+oracle and independently emits the selected compact v1 layout. It sets exact `NKIT v01` metadata,
+applies top-level and inner size transformations, relocates the represented partition, adjusts the
+compacted FST file offset, emits zero normal-hash flags, and encodes explicit mixed
+junk/fill/literal gaps plus partition/disc zero tails. It does not invoke the reconstructor in
+reverse. Both disc and partition gaps include deterministic junk, a nonzero fill, literal bytes,
+and offsets that exercise partial random-offset junk generation.
+
+### Disposable ISO, normal DiscIO, and WBFS-analysis proof
+
+The only ISO writer is `SparseIsoOutput` inside the test translation unit. It accepts only the path
+created by that test's `File::CreateTempDir`, uses sparse forward seeks only for semantic zero
+writes, finalizes the expected synthetic size, and is removed by test teardown. There is no
+production filename/path API.
+
+The focused proof compares the complete stored conventional prefix through the raw partition end
+against the independent byte oracle, including the normalized header, remapped table, partition
+metadata, all 64 encrypted clusters, mixed gaps, FST, and file. It then reopens the disposable ISO
+with normal `CreateDisc`, requires Wii detection, the synthetic ID, conventional hash/encryption
+flags, `IsNKit() == false`, the expected data partition, valid block/H3 integrity, and byte-exact
+`proof.bin`. Finally it calls only `AnalyzeWbfs`; the reconstructed conventional source is accepted
+with nonzero used/output planning, while the compact NKit source remains rejected with
+`WbfsAnalysisError::NKitSource`.
+
+### Recovery boundary, refined evidence, and N4 boundary
+
+Any N2 plan whose recovery requirement is not `None` is rejected before sequential-plan
+construction. N3 does not load recovery files or silently downgrade an archival requirement into
+the self-contained proof path.
+
+Inspection of the exact public v1 reference used by N2 refined one format assumption: the N2 gap
+decoder correctly exposes its raw bounded records, but the reference reader also applies
+filesystem-context-dependent leading-null handling around some canonical junk gaps. N3 therefore
+supports only the explicit gap records generated by its independent fixture and does not claim
+general canonical v1 compatibility. This narrows the proof subset without changing the N1/N2
+architecture.
+
+N4 should turn the proven validated layout/group transform into a production random-access
+reconstructed `BlobReader`: build a complete source-to-output index, handle multiple groups/files
+and normal v1 gap context, add a bounded decrypted/encrypted group cache and stable `CopyReader`,
+propagate cancellation outside `Read`, preserve source identity across preview/execution, and pass
+that conventional virtual source to the existing WBFS analysis/writer pipeline. N4 must retain the
+recovery policy and all current Game List/backend NKit blockers until that production path has its
+own acceptance matrix. It should not require or expose a user-visible temporary ISO.
+
+### N3 validation checkpoint
+
+The configured Ninja `RelWithDebInfo` build has tests and Qt enabled. The aggregate `tests` target
+and production `dolphin-emu` target both link successfully at `-j2`. Focused validation is 10/10
+N3 reconstruction tests, 43/43 N2 foundation regressions, 6/6 relevant SHA-1/TMD/DiscIO/WBFS-
+analysis regressions, and 5/5 no-output Wii Export bridge tests. The full Dolphin test suite was
+not run. No validation step called `WriteWbfs` or `ExecuteWiiExport`.

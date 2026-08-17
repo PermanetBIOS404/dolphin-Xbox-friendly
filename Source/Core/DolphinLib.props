@@ -519,6 +519,7 @@
     <ClInclude Include="DiscIO\NFSBlob.h" />
     <ClInclude Include="DiscIO\NKitV1.h" />
     <ClInclude Include="DiscIO\NKitV1Reconstruction.h" />
+    <ClInclude Include="DiscIO\NKitV1SequentialReconstructor.h" />
     <ClInclude Include="DiscIO\RiivolutionParser.h" />
     <ClInclude Include="DiscIO\RiivolutionPatcher.h" />
     <ClInclude Include="DiscIO\ScrubbedBlob.h" />
@@ -1232,6 +1233,7 @@
     <ClCompile Include="DiscIO\NFSBlob.cpp" />
     <ClCompile Include="DiscIO\NKitV1.cpp" />
     <ClCompile Include="DiscIO\NKitV1Reconstruction.cpp" />
+    <ClCompile Include="DiscIO\NKitV1SequentialReconstructor.cpp" />
     <ClCompile Include="DiscIO\RiivolutionParser.cpp" />
     <ClCompile Include="DiscIO\RiivolutionPatcher.cpp" />
     <ClCompile Include="DiscIO\ScrubbedBlob.cpp" />

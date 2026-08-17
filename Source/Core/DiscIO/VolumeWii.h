@@ -98,13 +98,24 @@ public:
   // This function returns false iff read_function returns false.
   static bool HashGroup(const std::array<u8, BLOCK_DATA_SIZE> in[BLOCKS_PER_GROUP],
                         HashBlock out[BLOCKS_PER_GROUP],
-                        const std::function<bool(size_t block)>& read_function = {});
+                        const std::function<bool(size_t block)>& read_function = {},
+                        bool single_threaded = false);
+
+  // Hashes and encrypts one already-materialized decrypted group. The single-threaded path keeps
+  // resource use bounded for callers which already perform their own sequential I/O.
+  static bool EncryptGroup(
+      const std::array<u8, BLOCK_DATA_SIZE> in[BLOCKS_PER_GROUP],
+      const std::array<u8, AES_KEY_SIZE>& key, std::array<u8, GROUP_TOTAL_SIZE>* out,
+      const std::function<void(HashBlock hash_blocks[BLOCKS_PER_GROUP])>&
+          hash_exception_callback = {},
+      bool single_threaded = false);
 
   static bool EncryptGroup(u64 offset, u64 partition_data_offset, u64 partition_data_decrypted_size,
                            const std::array<u8, AES_KEY_SIZE>& key, BlobReader* blob,
                            std::array<u8, GROUP_TOTAL_SIZE>* out,
                            const std::function<void(HashBlock hash_blocks[BLOCKS_PER_GROUP])>&
-                               hash_exception_callback = {});
+                               hash_exception_callback = {},
+                           bool single_threaded = false);
 
   static void DecryptBlockHashes(const u8* in, HashBlock* out, Common::AES::Context* aes_context);
   static void DecryptBlockData(const u8* in, u8* out, Common::AES::Context* aes_context);
