@@ -32,6 +32,10 @@ add_library(discio
   NANDImporter.h
   NFSBlob.cpp
   NFSBlob.h
+  NKitV1.cpp
+  NKitV1.h
+  NKitV1Reconstruction.cpp
+  NKitV1Reconstruction.h
   RiivolutionParser.cpp
   RiivolutionParser.h
   RiivolutionPatcher.cpp

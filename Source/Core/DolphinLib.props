@@ -517,6 +517,8 @@
     <ClInclude Include="DiscIO\MultithreadedCompressor.h" />
     <ClInclude Include="DiscIO\NANDImporter.h" />
     <ClInclude Include="DiscIO\NFSBlob.h" />
+    <ClInclude Include="DiscIO\NKitV1.h" />
+    <ClInclude Include="DiscIO\NKitV1Reconstruction.h" />
     <ClInclude Include="DiscIO\RiivolutionParser.h" />
     <ClInclude Include="DiscIO\RiivolutionPatcher.h" />
     <ClInclude Include="DiscIO\ScrubbedBlob.h" />
@@ -1228,6 +1230,8 @@
     <ClCompile Include="DiscIO\LaggedFibonacciGenerator.cpp" />
     <ClCompile Include="DiscIO\NANDImporter.cpp" />
     <ClCompile Include="DiscIO\NFSBlob.cpp" />
+    <ClCompile Include="DiscIO\NKitV1.cpp" />
+    <ClCompile Include="DiscIO\NKitV1Reconstruction.cpp" />
     <ClCompile Include="DiscIO\RiivolutionParser.cpp" />
     <ClCompile Include="DiscIO\RiivolutionPatcher.cpp" />
     <ClCompile Include="DiscIO\ScrubbedBlob.cpp" />

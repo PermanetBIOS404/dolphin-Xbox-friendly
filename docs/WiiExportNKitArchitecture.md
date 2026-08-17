@@ -789,3 +789,101 @@ N1/N2/N3 do not include:
 > with comprehensive legal synthetic tests. Recognize only exact supported retail Wii `NKIT v01`
 > inputs, keep all Game List/backend NKit blockers intact, write no ISO/WBFS, use no real game data,
 > and stop before partition group reconstruction or export integration.
+
+## 15. N2 implementation status
+
+N2 implements the bounded read-only foundation on branch
+`feature/wii-export-n2-nkit-foundation`, based on N1 commit
+`67f2d7cf222a7b6c8c06bc2c4b57d7c44b022aba`. It remains disconnected from Wii Export capability
+advertising and execution.
+
+### Production and test files
+
+Production code is in:
+
+* `Source/Core/DiscIO/NKitV1.h`
+* `Source/Core/DiscIO/NKitV1.cpp`
+* `Source/Core/DiscIO/NKitV1Reconstruction.h`
+* `Source/Core/DiscIO/NKitV1Reconstruction.cpp`
+* `Source/Core/DiscIO/CMakeLists.txt`
+* `Source/Core/DolphinLib.props`
+
+Legal synthetic coverage is in `Source/UnitTests/Core/NKitV1Test.cpp`, registered by
+`Source/UnitTests/Core/CMakeLists.txt`. The test fixture builds its fixed headers, partition tables,
+inner metadata, gap records, and made-up IDs entirely in memory; no binary game fixture is stored.
+
+### Public foundation API
+
+`AnalyzeWiiNKitV1(BlobReader&)` returns `NKitV1Result<NKitV1Analysis>`. Valid analyses contain
+getter-only `NKitV1Metadata`, `NKitV1PartitionMetadata`, `NKitV1RecoveryAssessment`, and a SHA-1
+fingerprint of the fixed source header. `DecodeNKitV1Gap` returns bounded getter-only
+`NKitV1GapSpan` instructions. `NKitV1JunkGenerator` generates a caller-provided byte range.
+`BuildWiiNKitV1ReconstructionPlan` is the only plan construction path. Validated metadata,
+analyses, spans, decode results, junk generators, and plans cannot be default-constructed into a
+half-valid state.
+
+The typed error model is `NKitV1ErrorCode` plus safe source offset and partition index fields. It
+distinguishes identification/version/platform failures, inaccurate or failed reads, truncated
+metadata, invalid IDs/sizes/tables/ranges/geometry, arithmetic overflow, malformed/truncated or
+over-limit gaps, overlap, external recovery requirements, and unsupported reconstruction features.
+No source-controlled text is returned.
+
+### Initially supported subset and validation
+
+The parser consumes Dolphin's already-decoded logical `BlobReader` stream, so PLAIN and compressed
+outer containers retain their existing `BlobType`; NKit is not a new blob type. The supported
+subset requires an accurate logical size, Wii magic, exact `NKIT v01`, alphanumeric synthetic-safe
+ID fields, both NKit decrypted/no-hash flags set, an exact retail single- or dual-layer original
+size, a bounded conventional four-group partition table, and at least one represented data
+partition. Each represented partition must have a bounded, non-overlapping, `0x8000`-aligned source
+range, the v1 `0x20000` compacted-data offset, an exact inner `NKIT v01`, and valid raw/decrypted Wii
+cluster geometry.
+
+Every offset, multiplication, addition, table range, source read, literal range, reconstructed
+range, and plan range is checked before use. Counts are capped by the fixed v1 partition-table
+layout, reads and allocations have fixed upper bounds, gap instruction count is caller-bounded,
+and a generated gap never allocates its reconstructed length. GameCube, version-like inner strings
+such as `NKIT v02`, unknown partition types, unsupported flag combinations, malformed layouts, and
+inaccurate logical streams fail with typed errors. In accordance with the N1 finding, `NKIT v02` is
+reported as an unsupported inner version and is not mislabeled as NKit 2: actual NKit 2 is separate
+outer-container metadata that this v1 logical-stream parser neither detects nor supports.
+
+### Recovery, normalization, gaps, and junk
+
+The reconstruction readiness state is deliberately named
+`FoundationValidatedPartitionReconstructionPending`: N2 does not infer or claim playability before
+partition reconstruction. A retained update reports `NoExternalRecoveryIndicated`; a nonzero
+removed-update CRC reports `ExternalUpdateRecoveryRequired` with requirement
+`RemovedUpdatePartition`. N2 does not locate, load, or download recovery material.
+
+Plan construction copies the validated fixed `0x50000` header in memory, clears `0x200..0x21b`,
+restores header bytes `0x60` and `0x61` to conventional hash/encryption values, preserves disc
+identity and represented partition inventory, and records original output geometry, source-header
+fingerprint, recovery assessment, and validated gap spans. Partition table offset remapping is not
+performed until N3, so this normalized header is not yet exposed as a complete disc.
+
+The gap decoder implements the v1 all-junk, all-scrubbed zero-fill, mixed junk/fill/literal,
+repeat, extended-length, and junk-file forms. It reports consumed encoded bytes and coalesced typed
+instructions in disc or decrypted-partition address space. Truncation, zero-progress mixed records,
+repeat-without-predecessor, range overflow, output overflow, invalid address domains, and excessive
+instruction counts are rejected.
+
+Gap semantics and Wii junk seed derivation were behaviorally adapted from Nanook/NKit commit
+`61dd683b4b70273a37c4513726b87943f2e32e37` under its MIT license; the full applicable notice is
+retained in `NKitV1Reconstruction.cpp`. The recurrence itself reuses Dolphin's existing CC0
+`LaggedFibonacciGenerator`. Junk is independently seeded for each `0x8000` segment and can generate
+any caller-bounded range. Tests pin an independently calculated fixed vector and prove a nonzero
+cross-segment slice matches full generation.
+
+### N3 boundary and N1 evidence status
+
+N2 does not reconstruct Wii `0x8000` raw clusters, generate their `0x400` hash areas or H0/H1/H2/H3
+trees, encrypt partitions, remap compacted file systems, create a random-readable complete disc,
+write a temporary ISO, write WBFS, or enable NKit in Wii Export. Existing `VolumeDisc::IsNKit()` and
+`WbfsAnalysisError::NKitSource` behavior remain covered by regression tests.
+
+No N1 architectural conclusion was contradicted. Source verification refined two implementation
+details without changing the architecture: top-level bytes `0x214..0x217` remain intentionally
+opaque because the v1 reader/writer does not require stronger semantics here, and Dolphin's
+existing lagged-Fibonacci implementation can safely supply the recurrence after NKit-specific seed
+derivation.
