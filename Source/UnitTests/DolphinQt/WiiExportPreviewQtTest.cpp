@@ -96,7 +96,8 @@ private:
   std::array<u8, 256> m_header{};
 };
 
-UICommon::WiiExportPreparedSource MakePreparedSource(bool nkit = false)
+UICommon::WiiExportPreparedSource MakePreparedSource(bool nkit = false,
+                                                     bool reconstructed_nkit = false)
 {
   GeneratedWiiReader reader;
   std::unique_ptr<DiscIO::VolumeDisc> volume = DiscIO::CreateDisc(reader.CopyReader());
@@ -114,6 +115,11 @@ UICommon::WiiExportPreparedSource MakePreparedSource(bool nkit = false)
   prepared.source.is_nkit = nkit;
   prepared.source.expected_wbfs_size_bytes = analysis->GetExpectedOutputSize();
   prepared.analysis = std::move(analysis);
+  if (reconstructed_nkit)
+  {
+    prepared.recipe.kind = UICommon::WiiExportSourceRecipeKind::ReconstructedNKitV1;
+    prepared.recipe.nkit_v1.emplace();
+  }
   return prepared;
 }
 
@@ -370,6 +376,36 @@ TEST(WiiExportPreviewQtTest, StructuredDestinationAndNKitBlockersHaveHumanMessag
                   ->text()
                   .contains(QStringLiteral("NKit")));
   EXPECT_TRUE(DirectoryEntries(directory.path()).size() == 1);
+}
+
+TEST(WiiExportPreviewQtTest, SupportedNKitRecipeHasConcisePlayableReconstructionWording)
+{
+  GetTestApplication();
+  QTemporaryDir directory;
+  ASSERT_TRUE(directory.isValid());
+  WiiExportPreviewDialog dialog(MakePreparedSource(false, true));
+  ASSERT_TRUE(dialog.SelectDestinationPath(directory.path()));
+
+  auto* const source_format =
+      dialog.findChild<QLabel*>(QStringLiteral("wiiExportSourceFormat"));
+  auto* const reconstruction =
+      dialog.findChild<QLabel*>(QStringLiteral("wiiExportReconstruction"));
+  auto* const status = dialog.findChild<QLabel*>(QStringLiteral("wiiExportStatus"));
+  auto* const messages = dialog.findChild<QLabel*>(QStringLiteral("wiiExportMessages"));
+  auto* const export_button =
+      dialog.findChild<QPushButton*>(QStringLiteral("wiiExportButton"));
+  ASSERT_NE(source_format, nullptr);
+  ASSERT_NE(reconstruction, nullptr);
+  ASSERT_NE(status, nullptr);
+  ASSERT_NE(messages, nullptr);
+  ASSERT_NE(export_button, nullptr);
+  EXPECT_EQ(source_format->text(), QStringLiteral("NKit v1"));
+  EXPECT_TRUE(reconstruction->text().contains(QStringLiteral("reconstructed during export")));
+  EXPECT_TRUE(status->text() == QStringLiteral("Ready") ||
+              status->text() == QStringLiteral("Ready with warnings"));
+  EXPECT_TRUE(messages->text().contains(QStringLiteral("playable WBFS")));
+  EXPECT_TRUE(messages->text().contains(QStringLiteral("archival-perfect")));
+  EXPECT_TRUE(export_button->isEnabled());
 }
 
 }  // namespace

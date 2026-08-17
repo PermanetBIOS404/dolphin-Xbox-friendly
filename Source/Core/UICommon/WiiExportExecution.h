@@ -100,6 +100,8 @@ struct WiiExportProgress
   u64 total_output_bytes = 0;
   u64 current_part_index = 0;
   u64 total_part_count = 0;
+  // True only for the indeterminate pre-execution rebuild of a prepared NKit source.
+  bool preparing_reconstructed_source = false;
 };
 
 using WiiExportProgressCallback = std::function<void(const WiiExportProgress&)>;

@@ -100,8 +100,62 @@ QString GetWiiExportPreparationErrorMessage(
   case Error::SourceIsNotWiiDisc:
     return GameList::tr("The selected source is no longer recognized as a Wii disc.");
   case Error::SourceIdentityChanged:
+    if (result.nkit_support == DolphinQt::WiiExportNKitV1Support::SourceChanged)
+    {
+      return GameList::tr(
+          "The NKit source changed after the preview was created. Reopen the export preview and "
+          "try again.");
+    }
     return GameList::tr(
         "The selected source no longer matches the Wii game shown in the Game List.");
+  case Error::Cancelled:
+    return GameList::tr("NKit reconstruction preparation was cancelled.");
+  case Error::NKitUnsupported:
+    switch (result.nkit_support)
+    {
+    case DolphinQt::WiiExportNKitV1Support::RecoveryRequired:
+      return GameList::tr(
+          "This NKit image requires external recovery data and cannot currently be exported as "
+          "playable WBFS.");
+    case DolphinQt::WiiExportNKitV1Support::UnsupportedGapContext:
+      return GameList::tr(
+          "This NKit image uses a filesystem or junk-gap context that Dolphin RWiN does not "
+          "support yet.");
+    case DolphinQt::WiiExportNKitV1Support::ExceptionalHashOrScrub:
+      return GameList::tr(
+          "This NKit image uses an exceptional hash or scrub form that Dolphin RWiN does not "
+          "support yet.");
+    case DolphinQt::WiiExportNKitV1Support::AdditionalPartitions:
+      return GameList::tr(
+          "This NKit image has additional partitions that Dolphin RWiN does not support yet.");
+    case DolphinQt::WiiExportNKitV1Support::CompressedOuterContainer:
+      return GameList::tr(
+          "NKit reconstruction from a compressed outer container is not supported yet.");
+    case DolphinQt::WiiExportNKitV1Support::DualLayer:
+      return GameList::tr("Dual-layer NKit reconstruction is not supported yet.");
+    case DolphinQt::WiiExportNKitV1Support::GameCube:
+      return GameList::tr("GameCube NKit export is not supported.");
+    case DolphinQt::WiiExportNKitV1Support::UnsupportedVersion:
+      return GameList::tr(
+          "This NKit version is not supported. NKit 2 export is not supported.");
+    case DolphinQt::WiiExportNKitV1Support::Malformed:
+      return GameList::tr("The NKit source is malformed, truncated, or corrupt.");
+    case DolphinQt::WiiExportNKitV1Support::SourceChanged:
+      return GameList::tr(
+          "The NKit source changed after the preview was created. Reopen the export preview and "
+          "try again.");
+    case DolphinQt::WiiExportNKitV1Support::UnsupportedLayout:
+      return GameList::tr(
+          "This NKit image uses a layout that Dolphin RWiN does not support yet.");
+    case DolphinQt::WiiExportNKitV1Support::Cancelled:
+      return GameList::tr("NKit reconstruction preparation was cancelled.");
+    case DolphinQt::WiiExportNKitV1Support::NotNKit:
+    case DolphinQt::WiiExportNKitV1Support::Supported:
+    case DolphinQt::WiiExportNKitV1Support::ReconstructionFailed:
+      return GameList::tr(
+          "The NKit reconstruction source could not be prepared safely for export.");
+    }
+    break;
   case Error::AnalysisFailed:
     break;
   }

@@ -26,8 +26,12 @@ MakeWiiExportProgressPresentation(const UICommon::WiiExportProgress& progress)
   switch (progress.stage)
   {
   case UICommon::WiiExportExecutionStage::Preparing:
-    presentation.status_text =
-        QCoreApplication::translate("WiiExportProgressDialog", "Preparing export...");
+    presentation.status_text = progress.preparing_reconstructed_source ?
+                                   QCoreApplication::translate(
+                                       "WiiExportProgressDialog",
+                                       "Preparing NKit reconstruction...") :
+                                   QCoreApplication::translate(
+                                       "WiiExportProgressDialog", "Preparing export...");
     break;
   case UICommon::WiiExportExecutionStage::Exporting:
     presentation.status_text =

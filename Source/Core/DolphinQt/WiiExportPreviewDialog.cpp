@@ -157,10 +157,23 @@ WiiExportPreviewDialog::WiiExportPreviewDialog(
   source_path->setTextInteractionFlags(Qt::TextSelectableByMouse);
   source_path->setWordWrap(true);
   source_layout->addRow(tr("Source path:"), source_path);
-  std::string source_format = DiscIO::GetName(source.blob_type, true);
-  if (source.is_nkit)
-    source_format += " (NKit)";
-  source_layout->addRow(tr("Source format:"), new QLabel(QString::fromStdString(source_format)));
+  const bool reconstructed_nkit =
+      m_model.GetPreparedSource().recipe.kind ==
+      UICommon::WiiExportSourceRecipeKind::ReconstructedNKitV1;
+  const QString source_format = reconstructed_nkit ?
+                                    tr("NKit v1") :
+                                    QString::fromStdString(
+                                        DiscIO::GetName(source.blob_type, true));
+  auto* const source_format_label = new QLabel(source_format);
+  source_format_label->setObjectName(QStringLiteral("wiiExportSourceFormat"));
+  source_layout->addRow(tr("Source format:"), source_format_label);
+  if (reconstructed_nkit)
+  {
+    auto* const reconstruction =
+        new QLabel(tr("Supported — reconstructed during export"));
+    reconstruction->setObjectName(QStringLiteral("wiiExportReconstruction"));
+    source_layout->addRow(tr("Reconstruction:"), reconstruction);
+  }
   source_layout->addRow(
       tr("Expected export size:"),
       new QLabel(QString::fromStdString(UICommon::FormatSize(source.expected_wbfs_size_bytes))));
@@ -356,5 +369,13 @@ void WiiExportPreviewDialog::UpdatePresentation()
   }
   for (const UICommon::WiiExportPreflightWarning warning : state.preflight.warnings)
     AppendUnique(&messages, GetPreflightWarningMessage(warning));
+  if (state.readiness != UICommon::WiiExportPreviewReadiness::Blocked &&
+      m_model.GetPreparedSource().recipe.kind ==
+          UICommon::WiiExportSourceRecipeKind::ReconstructedNKitV1)
+  {
+    AppendUnique(&messages,
+                 tr("Creates a playable WBFS from the supported reconstruction; this does not "
+                    "claim an archival-perfect original ISO."));
+  }
   m_messages->setText(messages.join(QLatin1Char('\n')));
 }

@@ -165,7 +165,7 @@ NKitV1Result<NKitV1Analysis> AnalyzeWiiNKitV1(BlobReader& reader)
   // Other combinations are deliberately outside the initial retail subset.
   if (header[0x60] != 1 || header[0x61] != 1)
     return std::unexpected(
-        Error(NKitV1ErrorCode::UnsupportedReconstructionFeature, 0x60));
+        Error(NKitV1ErrorCode::UnsupportedHashOrScrub, 0x60));
 
   u64 original_size = 0;
   if (!CheckedMultiply(ReadBigEndianU32(header, 0x210), 4, &original_size))

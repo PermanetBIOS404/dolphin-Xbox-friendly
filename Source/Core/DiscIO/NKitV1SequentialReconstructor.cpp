@@ -257,12 +257,12 @@ BuildWiiNKitV1SequentialReconstructionPlan(
     return std::unexpected(Error(NKitV1ErrorCode::ExternalRecoveryRequired));
   }
   if (metadata.GetPartitions().size() != 1 ||
-      metadata.GetPartitions()[0].GetType() != NKitV1PartitionType::Data ||
-      metadata.GetOriginalSize() != SL_DVD_SIZE ||
-      metadata.GetSourceBlobType() != BlobType::PLAIN)
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedReconstructionFeature));
-  }
+      metadata.GetPartitions()[0].GetType() != NKitV1PartitionType::Data)
+    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedAdditionalPartitions));
+  if (metadata.GetOriginalSize() != SL_DVD_SIZE)
+    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedDualLayer));
+  if (metadata.GetSourceBlobType() != BlobType::PLAIN)
+    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedOuterContainer));
   if (source.GetBlobType() != metadata.GetSourceBlobType() ||
       source.GetDataSizeType() != DataSizeType::Accurate ||
       source.GetDataSize() != metadata.GetSourceLogicalSize() ||
@@ -290,7 +290,7 @@ BuildWiiNKitV1SequentialReconstructionPlan(
       source_partition.GetOriginalRawSize() % VolumeWii::GROUP_TOTAL_SIZE != 0 ||
       source_partition.GetOriginalDecryptedSize() != group_count * VolumeWii::GROUP_DATA_SIZE)
   {
-    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedReconstructionFeature,
+    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedPartitionLayout,
                                  source_partition.GetSourceDataOffset(), partition_index));
   }
   if (source_partition.GetSourceOffset() < WII_NKIT_V1_HEADER_SIZE)
@@ -513,7 +513,7 @@ BuildWiiNKitV1SequentialReconstructionPlan(
       !std::all_of(payload->begin() + fst_end, payload->begin() + hash_flags_end,
                    [](u8 byte) { return byte == 0; }))
   {
-    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedReconstructionFeature,
+    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedHashOrScrub,
                                  source_partition.GetSourceDataOffset() + fst_end,
                                  partition_index));
   }

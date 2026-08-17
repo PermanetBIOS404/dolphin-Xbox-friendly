@@ -42,18 +42,19 @@ bool PlansMatchForExecution(const UICommon::WiiExportPlan& preview,
 }
 
 std::unique_ptr<UICommon::WiiExportBackend>
-CreateNativeBackend(const UICommon::WiiExportPreparedSource& prepared_source)
+CreateNativeBackend(const UICommon::WiiExportPreparedSource& prepared_source,
+                    const UICommon::WiiExportCancellationQuery& cancellation_query)
 {
   if (!prepared_source.analysis || !prepared_source.analysis->IsSuccessful())
     return nullptr;
 
-  std::unique_ptr<DiscIO::BlobReader> reader =
-      DiscIO::CreateBlobReader(prepared_source.source.source_path);
-  if (!reader)
+  WiiExportPreparedReaderCreation created = CreateWiiExportPreparedSourceReader(
+      prepared_source, {}, cancellation_query);
+  if (!created.IsSuccessful())
     return nullptr;
 
   return std::make_unique<UICommon::WiiExportNativeBackend>(
-      prepared_source.source.source_path, std::move(reader), *prepared_source.analysis);
+      prepared_source.source.source_path, std::move(created.reader), *prepared_source.analysis);
 }
 }  // namespace
 
@@ -78,6 +79,7 @@ std::optional<WiiExportGameListExecutionRequest> CreateWiiExportGameListExecutio
   request.split_policy = preview_state.split_policy;
   request.preview_plan = preview_state.plan;
   request.preview_source_fingerprint = prepared_source.analysis->GetSourceFingerprint();
+  request.preview_source_recipe = prepared_source.recipe;
   return request;
 }
 
@@ -98,8 +100,8 @@ WiiExportGameListExecutionResult RunWiiExportGameListExecution(
 
   if (!services.source_preparer)
   {
-    services.source_preparer = [](const WiiExportGameListEntry& entry) {
-      return PrepareWiiExportGameListSource(entry);
+    services.source_preparer = [&cancellation_query](const WiiExportGameListEntry& entry) {
+      return PrepareWiiExportGameListSource(entry, {}, {}, cancellation_query);
     };
   }
   if (!services.destination_inspector)
@@ -107,7 +109,12 @@ WiiExportGameListExecutionResult RunWiiExportGameListExecution(
   if (!services.planned_path_inspector)
     services.planned_path_inspector = InspectWiiExportPlannedPaths;
   if (!services.backend_factory)
-    services.backend_factory = CreateNativeBackend;
+  {
+    services.backend_factory = [&cancellation_query](
+                                   const UICommon::WiiExportPreparedSource& source) {
+      return CreateNativeBackend(source, cancellation_query);
+    };
+  }
   if (!services.executor)
   {
     services.executor = [](const UICommon::WiiExportExecutionRequest& execution_request,
@@ -118,9 +125,30 @@ WiiExportGameListExecutionResult RunWiiExportGameListExecution(
     };
   }
 
+  if (request.preview_source_recipe.kind ==
+          UICommon::WiiExportSourceRecipeKind::ReconstructedNKitV1 &&
+      progress_callback)
+  {
+    progress_callback({
+        .stage = UICommon::WiiExportExecutionStage::Preparing,
+        .total_output_bytes = request.preview_plan.total_planned_output_bytes,
+        .total_part_count = request.preview_plan.total_part_count,
+        .preparing_reconstructed_source = true,
+    });
+  }
+
   result.source_revalidation = services.source_preparer(request.entry);
   if (!result.source_revalidation.IsSuccessful())
   {
+    if (result.source_revalidation.error == WiiExportGameListPreparationError::Cancelled)
+    {
+      UICommon::WiiExportExecutionResult cancelled;
+      cancelled.outcome = UICommon::WiiExportExecutionOutcome::Cancelled;
+      cancelled.reason = UICommon::WiiExportExecutionReason::CancelledBeforeInvocation;
+      result.revalidation_error = WiiExportGameListRevalidationError::None;
+      result.execution = std::move(cancelled);
+      return result;
+    }
     result.revalidation_error =
         WiiExportGameListRevalidationError::SourceRevalidationFailed;
     return result;
@@ -156,6 +184,11 @@ WiiExportGameListExecutionResult RunWiiExportGameListExecution(
     result.revalidation_error = WiiExportGameListRevalidationError::SourceChanged;
     return result;
   }
+  if (prepared_source.recipe != request.preview_source_recipe)
+  {
+    result.revalidation_error = WiiExportGameListRevalidationError::SourceChanged;
+    return result;
+  }
   if (!PlansMatchForExecution(request.preview_plan, result.revalidated_preview->plan))
   {
     result.revalidation_error = WiiExportGameListRevalidationError::PlanChanged;
@@ -176,6 +209,15 @@ WiiExportGameListExecutionResult RunWiiExportGameListExecution(
       services.backend_factory(prepared_source);
   if (!backend)
   {
+    if (cancellation_query && cancellation_query())
+    {
+      UICommon::WiiExportExecutionResult cancelled;
+      cancelled.outcome = UICommon::WiiExportExecutionOutcome::Cancelled;
+      cancelled.reason = UICommon::WiiExportExecutionReason::CancelledBeforeInvocation;
+      result.revalidation_error = WiiExportGameListRevalidationError::None;
+      result.execution = std::move(cancelled);
+      return result;
+    }
     result.revalidation_error = WiiExportGameListRevalidationError::BackendUnavailable;
     return result;
   }

@@ -143,6 +143,9 @@ DolphinQt::WiiExportGameListSourcePreparation Prepare(
   return DolphinQt::PrepareWiiExportGameListSource(
       entry, [blob_type, nkit, source_size](const std::string&) {
         return MakeDisc(blob_type, nkit, source_size);
+      },
+      [blob_type, nkit, source_size](const std::string&) {
+        return std::make_unique<GeneratedWiiReader>(source_size, blob_type, nkit);
       });
 }
 
@@ -257,12 +260,15 @@ TEST(WiiExportGameListPreviewQtTest, SelectedMetadataFeedsExactPreviewSourceFiel
   EXPECT_EQ(result.prepared_source->source.platform, DiscIO::Platform::WiiDisc);
 }
 
-TEST(WiiExportGameListPreviewQtTest, NKitAndUnsupportedContainersNeverPrepareReadySource)
+TEST(WiiExportGameListPreviewQtTest, MalformedNKitAndUnsupportedContainersNeverPrepareReadySource)
 {
   const auto nkit = Prepare(MakeEntry(), DiscIO::BlobType::PLAIN, true);
-  EXPECT_EQ(nkit.error, DolphinQt::WiiExportGameListPreparationError::AnalysisFailed);
-  EXPECT_EQ(nkit.analysis_error, DiscIO::WbfsAnalysisError::NKitSource);
+  EXPECT_EQ(nkit.error, DolphinQt::WiiExportGameListPreparationError::NKitUnsupported);
+  EXPECT_EQ(nkit.nkit_support, DolphinQt::WiiExportNKitV1Support::UnsupportedVersion);
   EXPECT_FALSE(nkit.prepared_source);
+  const auto compact = MakeDisc(DiscIO::BlobType::PLAIN, true);
+  ASSERT_NE(compact, nullptr);
+  EXPECT_EQ(DiscIO::AnalyzeWbfs(*compact).GetError(), DiscIO::WbfsAnalysisError::NKitSource);
 
   const auto unsupported = Prepare(MakeEntry(), DiscIO::BlobType::GCZ);
   EXPECT_EQ(unsupported.error, DolphinQt::WiiExportGameListPreparationError::AnalysisFailed);

@@ -326,7 +326,7 @@ TEST(NKitV1Metadata, RejectsUnsupportedHashFlagCombination)
   fixture.bytes[0x60] = 0;
   auto result = Analyze(std::move(fixture));
   ASSERT_FALSE(result.has_value());
-  EXPECT_EQ(result.error().code, NKitV1ErrorCode::UnsupportedReconstructionFeature);
+  EXPECT_EQ(result.error().code, NKitV1ErrorCode::UnsupportedHashOrScrub);
 }
 
 TEST(NKitV1Metadata, RejectsInaccurateLogicalSourceSize)

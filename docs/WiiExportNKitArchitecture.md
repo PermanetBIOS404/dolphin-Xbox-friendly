@@ -1160,3 +1160,118 @@ remain later milestones.
 The N4 checkpoint is configured as Ninja `RelWithDebInfo` with tests and Qt enabled. Focused N4,
 N3, N2, relevant DiscIO, and Wii Export capability results are recorded in the N4 review report;
 the complete Dolphin suite is intentionally not part of the default milestone validation.
+
+## 18. N5 implementation status
+
+N5 connects the N4 conventional reconstructed view to the existing Wii Export Assistant without
+advertising compact NKit bytes as a native-writer input. It is based exactly on N4 commit
+`f6b4d541b94f647f9c955fcc541eccae29f7d7ae`. The integration remains synthetic-only; no real NKit
+image, user storage, everyday Dolphin installation, recovery service, overwrite path, or batch
+workflow participates in this milestone.
+
+### Prepared source recipe and capability assessment
+
+`WiiExportPreparedSource` now carries a `WiiExportSourceRecipe` in addition to its effective
+`WiiExportSource` and immutable `WbfsAnalysis`. `DirectDisc` retains the established ISO/RVZ path.
+`ReconstructedNKitV1` records the compact outer type and accurate sizes, reconstructed size and
+group count, the N2 fixed-header fingerprint, and a SHA-1 identity of the complete validated N4
+reconstruction recipe. That recipe identity covers generated disc and partition headers (including
+regenerated H3), sorted reconstruction ranges, decrypted spans, and FST offset patches. It is a
+bounded validated-plan identity, not an unsupported claim to hash an entire retail image.
+
+`PrepareWiiExportGameListSource` first opens the selected disc normally. A non-NKit Wii disc keeps
+the old analysis path. An NKit-marked Wii disc is instead reopened as a compact `BlobReader`, passed
+to `TryCreateWiiNKitV1ReconstructedReader`, opened as a conventional Wii `VolumeDisc`, checked for
+the selected ID6 and `IsNKit() == false`, and analyzed by the unchanged `AnalyzeWbfs`. The effective
+source supplied to planning is therefore accurate PLAIN and non-NKit. The original compact path and
+identity remain solely in the recipe. The native descriptor still omits `NKitInput`, and the broad
+direct `AnalyzeWbfs` compact-NKit rejection is unchanged.
+
+N5 adds product-facing support classifications for supported v1, recovery required, unsupported
+layout, unsupported FST/gap context, exceptional hash/scrub form, additional partitions,
+compressed outer source, dual layer, GameCube, unsupported version, malformed source, source
+change, cancellation, and generic reconstruction failure. DiscIO adds narrow typed error values for
+outer-container, dual-layer, additional-partition, partition-layout, and exceptional-hash decisions
+which N4 previously grouped under its conservative unsupported result. These refine reporting only;
+they do not broaden reconstruction.
+
+### Preview and execution-time recreation
+
+For a supported recipe the preview shows `Source format: NKit v1` and `Reconstruction: Supported —
+reconstructed during export`, while retaining the normal USB Loader GX WBFS layout, destination,
+collision, free-space, and Ready/Ready-with-warnings logic. Its wording describes a playable WBFS
+and explicitly avoids an archival-perfect ISO claim. ISO and RVZ presentations are unchanged.
+Unsupported cases fail before a Ready dialog and use specific recovery/layout/context/hash/
+container/version/corruption wording.
+
+Preview never retains a reconstructed reader. `CreateWiiExportGameListExecutionRequest` snapshots
+the immutable recipe. On Export, the worker rebuilds source preparation from the original compact
+path with cancellation enabled, reruns the factory and normal `AnalyzeWbfs`, compares the compact
+recipe identity, conventional WBFS fingerprint, ID6, support classification, destination facts,
+collisions, free space, and every planned field. A mismatch requires a new preview. The default
+backend factory then independently recreates the reader once more and compares the same recipe and
+analysis before transferring sole ownership to `WiiExportNativeBackend`; no preview-local reader,
+cache, cursor, or dangling reference crosses the worker boundary.
+
+After this boundary, the existing `ExecuteWiiExport` and `WiiExportNativeBackend` remain
+authoritative for no-overwrite planning, split naming, staging, `WriteWbfs`, progress validation,
+structural WBFS validation, publication, cleanup, and result handling. There is no second writer or
+NKit-specific output implementation. Direct compact NKit can therefore never reach `WriteWbfs` in
+the integrated path.
+
+### Cancellation, progress, and synthetic end-to-end proof
+
+The existing worker-thread boundary performs all NKit planning and group work off the GUI thread.
+The execution cancellation query is passed into both fresh source preparation and backend reader
+recreation; N4 checks it during the expensive plan/group scan, and the existing writer continues
+cooperative cancellation afterward. A cancelled preparation returns the normal cancelled result
+without invoking a backend or committing output. The UI adds only a truthful indeterminate
+`Preparing NKit reconstruction...` event before fresh reconstruction; writer byte progress and the
+existing Validating/Finalizing/Completed stages are unchanged. It does not invent a reconstruction
+percentage or promise interruption inside one bounded operation.
+
+The focused N5 fixture uses the independent N4 three-group, three-file synthetic NKit encoder. It
+exercises Game List source preparation, Ready planning, execution-time factory recreation, the
+normal execution contract and native backend, temporary WBFS output, normal DiscIO reopen, and
+byte-exact `alpha.bin`, `beta.bin`, and `charlie.bin` reads. The test also verifies that the compact
+source remains `NKitSource` when analyzed directly, reconstructed planning requires PLAIN rather
+than `NKitInput`, success leaves only the synthetic source and final WBFS, changed header/recipe and
+changed support classification block before writer invocation, and cancellation commits no output.
+
+### N5 support/rejection matrix
+
+| Case | N5 preview/export result |
+| --- | --- |
+| Exact N4-supported Wii `NKIT v01` PLAIN/accurate/single-layer/one-data-partition/normal-hash/root-file subset | Ready via reconstructed conventional PLAIN source |
+| One or multiple complete groups and multiple supported root-level regular files | Ready; covered by N4 recipe and synthetic end-to-end proof |
+| Removed-update recovery requirement | Blocked: external recovery required |
+| Retained additional partition or unsupported partition layout | Blocked with additional-partition/layout reason |
+| Exceptional hash/scrub flags | Blocked with hash/scrub reason |
+| Nested directory, junk-file, or unsupported canonical gap/FST context | Blocked with filesystem/gap-context reason |
+| GCZ/RVZ/WIA or other compressed compact outer source | Blocked as compressed outer NKit |
+| Dual-layer metadata | Blocked as unproven dual-layer reconstruction |
+| Malformed, truncated, corrupt, overflowed, or identity-mismatched source | Blocked; no reader/backend |
+| GameCube NKit | Ineligible/blocked; no GameCube support |
+| Unsupported v1 marker such as `NKIT v02` and actual NKit 2 | Blocked; no NKit 2 claim |
+
+### Exact N6 boundary
+
+N6 may launch only the isolated N5 binary and inspect one legally owned Wii NKit image at a time.
+It should first observe the support classification without export. Only a source classified inside
+the exact N4/N5 supported matrix may proceed through preview, WBFS export, output reopen/validation,
+and controlled boot/play testing. Any recovery, layout, hash, FST/gap, outer-container, dual-layer,
+or version rejection is an acceptance result to record, not permission to weaken the boundary.
+N6 must not enable additional variants, download recovery data, install over everyday Dolphin, or
+touch unrelated SD/RWIN-GAMR storage.
+
+### N5 validation checkpoint
+
+The isolated Ninja `RelWithDebInfo` configuration has Qt and the aggregate tests enabled. Both the
+`tests` target and production `dolphin-emu` target link successfully with every build invocation
+limited to `-j2`. Validation is 6/6 N5-focused integration/UX tests, 8/8 N4 random-access tests,
+10/10 N3 sequential/ISO proofs, 43/43 N2 foundation tests, 185/185 tests across the complete
+affected Wii Export planner, execution, native-backend, writer, preview, Game List, and progress
+families, and 3/3 representative Physical SD smoke tests. The full Dolphin suite was intentionally
+not run because the bounded affected matrix was green. All N5 WBFS artifacts were synthetic,
+temporary, reopened through normal DiscIO, and automatically cleaned; no real NKit/game or user
+storage participated.

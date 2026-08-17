@@ -652,6 +652,19 @@ TEST(WiiExportProgressPresentationQtTest, StartsIndeterminateAndWritingUsesRealB
   EXPECT_TRUE(writing.status_text.contains(QStringLiteral("Writing")));
 }
 
+TEST(WiiExportProgressPresentationQtTest, NKitPreparationIsTruthfulAndIndeterminate)
+{
+  const auto preparing = DolphinQt::MakeWiiExportProgressPresentation({
+      .stage = UICommon::WiiExportExecutionStage::Preparing,
+      .total_output_bytes = 100,
+      .total_part_count = 1,
+      .preparing_reconstructed_source = true,
+  });
+  EXPECT_FALSE(preparing.determinate);
+  EXPECT_FALSE(preparing.complete);
+  EXPECT_TRUE(preparing.status_text.contains(QStringLiteral("NKit reconstruction")));
+}
+
 TEST(WiiExportProgressPresentationQtTest, FullByteCountIsNotPrematureCompletion)
 {
   const auto writing = DolphinQt::MakeWiiExportProgressPresentation({

@@ -13,6 +13,10 @@ add_dolphin_test(WiimotePointerTest HW/WiimotePointerTest.cpp)
 
 if(ENABLE_QT)
   find_package(Qt6 REQUIRED COMPONENTS Test Widgets)
+  target_compile_definitions(NKitV1SequentialReconstructorTest PRIVATE
+    N5_QT_INTEGRATION_TESTS=1)
+  target_link_libraries(NKitV1SequentialReconstructorTest PUBLIC Qt6::Widgets)
+
   add_dolphin_test(QuickMenuTest
     ../DolphinQt/QuickMenuTest.cpp
     ${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/QuickMenu.cpp

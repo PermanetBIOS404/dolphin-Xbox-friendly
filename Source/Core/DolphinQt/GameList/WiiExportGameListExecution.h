@@ -22,6 +22,7 @@ struct WiiExportGameListExecutionRequest final
   UICommon::WiiExportSplitPolicy split_policy = UICommon::WiiExportSplitPolicy::Automatic;
   UICommon::WiiExportPlan preview_plan;
   Common::SHA1::Digest preview_source_fingerprint{};
+  UICommon::WiiExportSourceRecipe preview_source_recipe;
 };
 
 // Captures only a preview that the existing C5 model considers executable. The snapshot is later

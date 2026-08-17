@@ -40,6 +40,14 @@
 #include "DiscIO/WbfsBlob.h"
 #include "DiscIO/WbfsWriter.h"
 
+#ifdef N5_QT_INTEGRATION_TESTS
+#include <QString>
+
+#include "DolphinQt/GameList/WiiExportGameListExecution.h"
+#include "DolphinQt/GameList/WiiExportGameListPreview.h"
+#include "UICommon/WiiExportPreview.h"
+#endif
+
 namespace DiscIO
 {
 namespace
@@ -102,16 +110,18 @@ class SparseMemoryBlobReader final : public BlobReader
 {
 public:
   SparseMemoryBlobReader(std::shared_ptr<std::vector<u8>> bytes, u64 logical_size,
-                         std::optional<u64> failure_offset = std::nullopt)
+                         std::optional<u64> failure_offset = std::nullopt,
+                         BlobType blob_type = BlobType::PLAIN)
       : m_bytes(std::move(bytes)), m_logical_size(logical_size),
-        m_failure_offset(failure_offset)
+        m_failure_offset(failure_offset), m_blob_type(blob_type)
   {
   }
 
-  BlobType GetBlobType() const override { return BlobType::PLAIN; }
+  BlobType GetBlobType() const override { return m_blob_type; }
   std::unique_ptr<BlobReader> CopyReader() const override
   {
-    return std::make_unique<SparseMemoryBlobReader>(m_bytes, m_logical_size, m_failure_offset);
+    return std::make_unique<SparseMemoryBlobReader>(m_bytes, m_logical_size, m_failure_offset,
+                                                     m_blob_type);
   }
   u64 GetRawSize() const override { return m_logical_size; }
   u64 GetDataSize() const override { return m_logical_size; }
@@ -139,6 +149,7 @@ private:
   std::shared_ptr<std::vector<u8>> m_bytes;
   u64 m_logical_size;
   std::optional<u64> m_failure_offset;
+  BlobType m_blob_type;
 };
 
 struct SyntheticConventionalWiiDisc
@@ -588,9 +599,10 @@ struct SyntheticN4NKitFixture
   u64 flags_offset = 0;
   u64 file_a_source_offset = 0;
 
-  std::unique_ptr<BlobReader> MakeReader() const
+  std::unique_ptr<BlobReader> MakeReader(BlobType blob_type = BlobType::PLAIN) const
   {
-    return std::make_unique<SparseMemoryBlobReader>(bytes, bytes->size());
+    return std::make_unique<SparseMemoryBlobReader>(bytes, bytes->size(), std::nullopt,
+                                                     blob_type);
   }
 };
 
@@ -1008,7 +1020,7 @@ TEST_F(NKitV1SequentialProofTest, RejectsMalformedGeometryFlagsRangesTruncationA
     ASSERT_TRUE(foundation.has_value());
     auto plan = BuildWiiNKitV1SequentialReconstructionPlan(*source, *foundation);
     ASSERT_FALSE(plan.has_value());
-    EXPECT_EQ(plan.error().code, NKitV1ErrorCode::UnsupportedReconstructionFeature);
+    EXPECT_EQ(plan.error().code, NKitV1ErrorCode::UnsupportedHashOrScrub);
   }
   {
     SyntheticNKitV1Fixture fixture = s_nkit;
@@ -1315,8 +1327,7 @@ TEST_F(NKitV1RandomAccessTest, CanonicalGapContextsAndConservativeRejectionsAreE
   auto exceptional_result =
       TryCreateWiiNKitV1ReconstructedReader(exceptional.MakeReader());
   ASSERT_FALSE(exceptional_result.has_value());
-  EXPECT_EQ(exceptional_result.error().code,
-            NKitV1ErrorCode::UnsupportedReconstructionFeature);
+  EXPECT_EQ(exceptional_result.error().code, NKitV1ErrorCode::UnsupportedHashOrScrub);
 }
 
 TEST_F(NKitV1RandomAccessTest, SourceMutationAndCancellationFailSafely)
@@ -1430,6 +1441,289 @@ TEST_F(NKitV1RandomAccessTest, ExistingWriterProducesAndReopensSyntheticWbfsWith
   for (const auto& entry : std::filesystem::directory_iterator(m_temp_directory))
     EXPECT_FALSE(entry.path().filename().string().starts_with("cancelled.xxx"));
 }
+
+#ifdef N5_QT_INTEGRATION_TESTS
+namespace
+{
+DolphinQt::WiiExportGameListEntry MakeN5Entry(std::string source_path)
+{
+  return {
+      .platform = Platform::WiiDisc,
+      .is_valid = true,
+      .is_mod_descriptor = false,
+      .source_available = true,
+      .source_path = std::move(source_path),
+      .display_title = "N5 Synthetic Reconstruction",
+      .game_id = "RN4P01",
+  };
+}
+
+DolphinQt::WiiExportGameListSourcePreparation PrepareN5Fixture(
+    const DolphinQt::WiiExportGameListEntry& entry, const SyntheticN4NKitFixture& fixture,
+    BlobType compact_blob_type = BlobType::PLAIN)
+{
+  return DolphinQt::PrepareWiiExportGameListSource(
+      entry,
+      [&fixture](const std::string&) { return CreateDisc(fixture.MakeReader()); },
+      [&fixture, compact_blob_type](const std::string&) {
+        return fixture.MakeReader(compact_blob_type);
+      });
+}
+
+UICommon::WiiExportDestinationInspection MakeN5Destination(const std::string& root)
+{
+  return {
+      .error = UICommon::WiiExportDestinationInspectionError::None,
+      .selected_path = root,
+      .absolute_root = root,
+      .raw_filesystem_type = "ext4",
+      .filesystem = UICommon::WiiExportDestinationFilesystem::LargeFileCapable,
+      .available_space_bytes = std::numeric_limits<u64>::max(),
+      .storage_valid = true,
+      .storage_ready = true,
+  };
+}
+
+UICommon::WiiExportPlannedPathInspection N5NoCollisions(
+    const std::string&, const std::vector<std::string>& paths)
+{
+  return {UICommon::WiiExportPlannedPathInspectionError::None, paths, {}};
+}
+
+DolphinQt::WiiExportGameListExecutionServices MakeN5ExecutionServices(
+    const std::string& destination_root)
+{
+  DolphinQt::WiiExportGameListExecutionServices services;
+  services.destination_inspector = [destination_root](const QString&) {
+    return MakeN5Destination(destination_root);
+  };
+  services.planned_path_inspector = N5NoCollisions;
+  return services;
+}
+
+bool WriteN5Fixture(const std::string& path, const SyntheticN4NKitFixture& fixture)
+{
+  File::IOFile file(path, "wb");
+  return file.IsOpen() && file.WriteBytes(fixture.bytes->data(), fixture.bytes->size()) &&
+         file.Flush() && file.Close();
+}
+}  // namespace
+
+TEST_F(NKitV1RandomAccessTest, N5PreparedRecipePresentsOnlyAConventionalWriterSource)
+{
+  const auto entry = MakeN5Entry("/synthetic/n5-supported.nkit.iso");
+  EXPECT_TRUE(DolphinQt::IsWiiExportGameListEntryEligible(entry));
+  const auto preparation = PrepareN5Fixture(entry, s_nkit);
+  ASSERT_TRUE(preparation.IsSuccessful());
+  EXPECT_EQ(preparation.nkit_support, DolphinQt::WiiExportNKitV1Support::Supported);
+  ASSERT_TRUE(preparation.prepared_source->recipe.nkit_v1.has_value());
+  EXPECT_EQ(preparation.prepared_source->recipe.kind,
+            UICommon::WiiExportSourceRecipeKind::ReconstructedNKitV1);
+  EXPECT_EQ(preparation.prepared_source->source.blob_type, BlobType::PLAIN);
+  EXPECT_FALSE(preparation.prepared_source->source.is_nkit);
+  EXPECT_GT(preparation.prepared_source->recipe.nkit_v1->partition_group_count, 1u);
+
+  auto created = DolphinQt::CreateWiiExportPreparedSourceReader(
+      *preparation.prepared_source,
+      [](const std::string&) { return s_nkit.MakeReader(); });
+  ASSERT_TRUE(created.IsSuccessful());
+  EXPECT_EQ(created.reader->GetBlobType(), BlobType::PLAIN);
+  std::unique_ptr<VolumeDisc> volume = CreateDisc(created.reader->CopyReader());
+  ASSERT_NE(volume, nullptr);
+  EXPECT_FALSE(volume->IsNKit());
+  EXPECT_EQ(volume->GetGameID(), "RN4P01");
+  EXPECT_TRUE(AnalyzeWbfs(*volume).IsSuccessful());
+
+  UICommon::WiiExportPreviewModel model(*preparation.prepared_source, N5NoCollisions);
+  ASSERT_TRUE(model.SelectDestination(MakeN5Destination(m_temp_directory)));
+  ASSERT_EQ(model.GetState().readiness, UICommon::WiiExportPreviewReadiness::Ready);
+  EXPECT_FALSE(model.GetState().plan.requires_nkit_input);
+  EXPECT_EQ(model.GetState().plan.required_source_blob_type, BlobType::PLAIN);
+
+  std::unique_ptr<VolumeDisc> compact = CreateDisc(s_nkit.MakeReader());
+  ASSERT_NE(compact, nullptr);
+  EXPECT_TRUE(compact->IsNKit());
+  EXPECT_EQ(AnalyzeWbfs(*compact).GetError(), WbfsAnalysisError::NKitSource);
+}
+
+TEST_F(NKitV1RandomAccessTest, N5DefaultExecutionRebuildsAndWritesValidatedSyntheticWbfs)
+{
+  const std::string source_path = m_temp_directory + "/supported.nkit.iso";
+  ASSERT_TRUE(WriteN5Fixture(source_path, s_nkit));
+  const auto entry = MakeN5Entry(source_path);
+  const auto preparation = DolphinQt::PrepareWiiExportGameListSource(entry);
+  ASSERT_TRUE(preparation.IsSuccessful());
+
+  UICommon::WiiExportPreviewModel model(*preparation.prepared_source, N5NoCollisions);
+  ASSERT_TRUE(model.SelectDestination(MakeN5Destination(m_temp_directory)));
+  auto request = DolphinQt::CreateWiiExportGameListExecutionRequest(
+      entry, *preparation.prepared_source, model.GetState());
+  ASSERT_TRUE(request.has_value());
+
+  std::vector<UICommon::WiiExportProgress> progress;
+  const auto result = DolphinQt::RunWiiExportGameListExecution(
+      *request,
+      [&progress](const UICommon::WiiExportProgress& event) { progress.emplace_back(event); }, {},
+      MakeN5ExecutionServices(m_temp_directory));
+  ASSERT_EQ(result.revalidation_error,
+            DolphinQt::WiiExportGameListRevalidationError::None);
+  ASSERT_TRUE(result.execution.has_value());
+  ASSERT_EQ(result.execution->outcome, UICommon::WiiExportExecutionOutcome::Succeeded);
+  EXPECT_TRUE(result.execution_invoked);
+  ASSERT_FALSE(progress.empty());
+  EXPECT_EQ(progress.front().stage, UICommon::WiiExportExecutionStage::Preparing);
+  EXPECT_TRUE(progress.front().preparing_reconstructed_source);
+
+  ASSERT_EQ(result.execution->final_relative_paths.size(), 1u);
+  const std::filesystem::path output =
+      std::filesystem::path(m_temp_directory) / result.execution->final_relative_paths.front();
+  ASSERT_TRUE(File::Exists(output.string()));
+  std::unique_ptr<VolumeDisc> reopened = CreateDisc(output.string());
+  ASSERT_NE(reopened, nullptr);
+  EXPECT_EQ(reopened->GetGameID(), "RN4P01");
+  EXPECT_FALSE(reopened->IsNKit());
+  const Partition partition = reopened->GetGamePartition();
+  ASSERT_NE(partition, PARTITION_NONE);
+  ExpectFile(*reopened, partition, "alpha.bin", N4_FILE_A, N4_FILE_A_OFFSET);
+  ExpectFile(*reopened, partition, "beta.bin", N4_FILE_B, N4_FILE_B_OFFSET);
+  ExpectFile(*reopened, partition, "charlie.bin", N4_FILE_C, N4_FILE_C_OFFSET);
+
+  size_t regular_files = 0;
+  for (const auto& file : std::filesystem::recursive_directory_iterator(m_temp_directory))
+  {
+    if (file.is_regular_file())
+      ++regular_files;
+    EXPECT_FALSE(file.path().filename().string().starts_with("supported.xxx"));
+  }
+  EXPECT_EQ(regular_files, 2u);
+}
+
+TEST_F(NKitV1RandomAccessTest, N5FreshIdentitySupportAndCancellationRevalidationAreAuthoritative)
+{
+  const std::string source_path = m_temp_directory + "/mutable.nkit.iso";
+  ASSERT_TRUE(WriteN5Fixture(source_path, s_nkit));
+  const auto entry = MakeN5Entry(source_path);
+  const auto preparation = DolphinQt::PrepareWiiExportGameListSource(entry);
+  ASSERT_TRUE(preparation.IsSuccessful());
+  UICommon::WiiExportPreviewModel model(*preparation.prepared_source, N5NoCollisions);
+  ASSERT_TRUE(model.SelectDestination(MakeN5Destination(m_temp_directory)));
+  auto request = DolphinQt::CreateWiiExportGameListExecutionRequest(
+      entry, *preparation.prepared_source, model.GetState());
+  ASSERT_TRUE(request.has_value());
+
+  {
+    File::IOFile file(source_path, "r+b");
+    ASSERT_TRUE(file.IsOpen());
+    ASSERT_TRUE(file.Seek(0x100, File::SeekOrigin::Begin));
+    const u8 changed = static_cast<u8>((*s_nkit.bytes)[0x100] ^ 1);
+    ASSERT_TRUE(file.WriteBytes(&changed, 1));
+    ASSERT_TRUE(file.Flush());
+  }
+  auto changed = DolphinQt::RunWiiExportGameListExecution(
+      *request, {}, {}, MakeN5ExecutionServices(m_temp_directory));
+  EXPECT_EQ(changed.revalidation_error,
+            DolphinQt::WiiExportGameListRevalidationError::SourceChanged);
+  EXPECT_FALSE(changed.execution_invoked);
+
+  ASSERT_TRUE(WriteN5Fixture(source_path, s_nkit));
+  {
+    File::IOFile file(source_path, "r+b");
+    ASSERT_TRUE(file.IsOpen());
+    ASSERT_TRUE(file.Seek(SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE +
+                              s_nkit.flags_offset,
+                          File::SeekOrigin::Begin));
+    constexpr u8 exceptional = 0x80;
+    ASSERT_TRUE(file.WriteBytes(&exceptional, 1));
+    ASSERT_TRUE(file.Flush());
+  }
+  auto unsupported = DolphinQt::RunWiiExportGameListExecution(
+      *request, {}, {}, MakeN5ExecutionServices(m_temp_directory));
+  EXPECT_EQ(unsupported.revalidation_error,
+            DolphinQt::WiiExportGameListRevalidationError::SourceRevalidationFailed);
+  EXPECT_EQ(unsupported.source_revalidation.nkit_support,
+            DolphinQt::WiiExportNKitV1Support::ExceptionalHashOrScrub);
+  EXPECT_FALSE(unsupported.execution_invoked);
+
+  ASSERT_TRUE(WriteN5Fixture(source_path, s_nkit));
+  std::vector<UICommon::WiiExportProgress> progress;
+  const auto cancelled = DolphinQt::RunWiiExportGameListExecution(
+      *request,
+      [&progress](const UICommon::WiiExportProgress& event) { progress.emplace_back(event); },
+      [] { return true; }, MakeN5ExecutionServices(m_temp_directory));
+  EXPECT_EQ(cancelled.revalidation_error,
+            DolphinQt::WiiExportGameListRevalidationError::None);
+  ASSERT_TRUE(cancelled.execution.has_value());
+  EXPECT_EQ(cancelled.execution->outcome, UICommon::WiiExportExecutionOutcome::Cancelled);
+  EXPECT_FALSE(cancelled.execution_invoked);
+  ASSERT_FALSE(progress.empty());
+  EXPECT_TRUE(progress.front().preparing_reconstructed_source);
+  EXPECT_FALSE(File::IsDirectory(m_temp_directory + "/wbfs"));
+}
+
+TEST_F(NKitV1RandomAccessTest, N5BlockedSupportMatrixReturnsSpecificTypedReasons)
+{
+  const auto entry = MakeN5Entry("/synthetic/n5-blocked.nkit.iso");
+  const auto expect = [&](SyntheticN4NKitFixture fixture,
+                          DolphinQt::WiiExportNKitV1Support expected,
+                          BlobType blob_type = BlobType::PLAIN) {
+    const auto preparation = PrepareN5Fixture(entry, fixture, blob_type);
+    EXPECT_FALSE(preparation.IsSuccessful());
+    EXPECT_EQ(preparation.error, DolphinQt::WiiExportGameListPreparationError::NKitUnsupported);
+    EXPECT_EQ(preparation.nkit_support, expected);
+  };
+
+  SyntheticN4NKitFixture recovery = s_nkit;
+  recovery.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
+  WriteBigEndianU32(*recovery.bytes, 0x218, 0xa1b2c3d4);
+  expect(std::move(recovery), DolphinQt::WiiExportNKitV1Support::RecoveryRequired);
+
+  SyntheticN4NKitFixture gap = s_nkit;
+  gap.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
+  (*gap.bytes)[SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE + FST_OFFSET + 12] = 1;
+  expect(std::move(gap), DolphinQt::WiiExportNKitV1Support::UnsupportedGapContext);
+
+  SyntheticN4NKitFixture hash = s_nkit;
+  hash.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
+  (*hash.bytes)[SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE + hash.flags_offset] = 0x80;
+  expect(std::move(hash), DolphinQt::WiiExportNKitV1Support::ExceptionalHashOrScrub);
+
+  SyntheticN4NKitFixture dual = s_nkit;
+  dual.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
+  WriteBigEndianU32(*dual.bytes, 0x210, static_cast<u32>(DL_DVD_SIZE / 4));
+  expect(std::move(dual), DolphinQt::WiiExportNKitV1Support::DualLayer);
+
+  expect(s_nkit, DolphinQt::WiiExportNKitV1Support::CompressedOuterContainer, BlobType::RVZ);
+
+  SyntheticN4NKitFixture version = s_nkit;
+  version.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
+  std::copy_n("NKIT v02", 8, version.bytes->begin() + 0x200);
+  expect(std::move(version), DolphinQt::WiiExportNKitV1Support::UnsupportedVersion);
+
+  SyntheticN4NKitFixture malformed = s_nkit;
+  malformed.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
+  malformed.bytes->resize(malformed.bytes->size() - 1);
+  expect(std::move(malformed), DolphinQt::WiiExportNKitV1Support::Malformed);
+
+  SyntheticN4NKitFixture additional = s_nkit;
+  additional.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
+  const size_t partition_bytes = additional.bytes->size() - SOURCE_PARTITION_OFFSET;
+  const std::vector<u8> partition_copy(
+      additional.bytes->begin() + SOURCE_PARTITION_OFFSET, additional.bytes->end());
+  const u64 second_partition = Common::AlignUp<u64>(additional.bytes->size(), 0x8000);
+  additional.bytes->resize(static_cast<size_t>(second_partition) + partition_bytes);
+  std::copy(partition_copy.begin(), partition_copy.end(),
+            additional.bytes->begin() + second_partition);
+  WriteBigEndianU32(*additional.bytes, 0x40000, 2);
+  WriteBigEndianU32(*additional.bytes, 0x40028,
+                    static_cast<u32>(second_partition / 4));
+  WriteBigEndianU32(*additional.bytes, 0x4002c, PARTITION_UPDATE);
+  expect(std::move(additional), DolphinQt::WiiExportNKitV1Support::AdditionalPartitions);
+
+  auto gamecube = entry;
+  gamecube.platform = Platform::GameCubeDisc;
+  EXPECT_FALSE(DolphinQt::IsWiiExportGameListEntryEligible(gamecube));
+}
+#endif
 
 }  // namespace
 }  // namespace DiscIO
