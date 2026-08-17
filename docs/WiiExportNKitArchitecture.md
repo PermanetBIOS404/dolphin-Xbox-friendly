@@ -1275,3 +1275,84 @@ families, and 3/3 representative Physical SD smoke tests. The full Dolphin suite
 not run because the bounded affected matrix was green. All N5 WBFS artifacts were synthetic,
 temporary, reopened through normal DiscIO, and automatically cleaned; no real NKit/game or user
 storage participated.
+
+## 19. O1 retail compatibility: removed update partitions
+
+O1 begins the retail-compatibility arc from N5 commit
+`ba703fd1386a07b6d2b7e5f01af85b67293ec652`. Unlike N1-N5, O1 used one explicitly authorized,
+legally owned retail image as a bounded read-only diagnostic input: *Kirby's Epic Yarn* USA,
+ID6 `RK5E01`. No retail bytes are committed, and no ISO or WBFS was written from that source.
+
+### Real diagnosis and canonical behavior
+
+Kirby is a PLAIN, accurate, single-layer Wii `NKIT v01` source. Its top-level metadata has a
+nonzero removed-update CRC32 (`0xafd3a24a`) at `0x218`, and its compact partition table retains one
+data partition at source offset `0x58000`. The 32 KiB range at `0x50000` is the canonical removed-
+update placeholder: its first `0x100` bytes preserve an original two-entry partition table with an
+update partition at conventional offset `0x50000` and the data partition at `0x0f800000`; the rest
+is zero padding. The retained data-partition header begins at `0x58000`, and compact decrypted data
+begins at `0x78000`.
+
+The old block was therefore exact but over-broad. `AnalyzeWiiNKitV1` classified the nonzero CRC as
+`ExternalUpdateRecoveryRequired` / `RemovedUpdatePartition`, and
+`BuildWiiNKitV1SequentialReconstructionPlan` rejected every non-`None` recovery requirement as
+`ExternalRecoveryRequired` before inspecting the placeholder or retained filesystem.
+
+Reference NKit behavior was checked at the already-pinned MIT-licensed commit
+`61dd683b4b70273a37c4513726b87943f2e32e37`. `NkitWriterWii` and
+`WiiPartitionPlaceHolder` preserve the original partition-table bytes in this 32 KiB placeholder
+when removing an update. `NkitReaderWii` uses the saved data-partition offset and, when no recovery
+partition is available, inserts filler through that offset and continues ordinary ISO conversion.
+`RecoverReaderWii` is a separate archival-recovery pass. Thus external update data is needed for
+byte-identical archival recovery, not for the retained game partition's playable conventional
+view. O1 behavior is adapted from that documented algorithm and retains the existing MIT
+provenance notice in the reconstruction implementation.
+
+### Playable and archival policy refinement
+
+`NKitV1RecoveryAssessment` now carries an independent `NKitV1PlayableAssessment`. The two proven
+states are self-contained and synthetic-non-game-regions-required. A removed-update CRC continues
+to report `ExternalUpdateRecoveryRequired` and `RemovedUpdatePartition` for archival truth, while
+its playable assessment reports `SyntheticNonGameRegionsRequired`. Wii Export similarly carries
+`requires_external_archival_recovery` separately from `is_nkit`: the reconstructed conventional
+view remains non-NKit writer input, but planning no longer falsely reports that archival recovery
+is unnecessary.
+
+The sequential planner accepts only the format-driven canonical placeholder form inside O1's
+existing one-data-partition subset. It requires exactly 32 KiB, zero padding after the saved
+`0x100` partition-table region, one update entry at `0x50000`, one aligned retained data entry, no
+other descriptors or partition types, and fully bounded offsets. It takes the conventional data-
+partition offset from that saved table and emits one zero-fill index range from `0x50000` to the
+retained data partition. The normalized conventional header continues to expose only the playable
+retained data partition. Malformed placeholders, extra saved partitions, and absent retained game
+data fail with typed errors; no title or ID-specific branch exists.
+
+### Synthetic proof and real read-only reassessment
+
+The N4 independent three-group/three-file fixture now has an O1 variant containing invented data,
+a synthetic removed-update CRC, and an independently built canonical saved partition table. Tests
+prove that playable and archival assessments differ, the production random-access reader builds,
+the non-game region is zero-filled, representative partition bytes remain oracle-identical, normal
+DiscIO validates hashes and all files, `AnalyzeWbfs` accepts the conventional view, and the existing
+`WriteWbfs` produces a temporary synthetic WBFS which reopens with all known files. The compact
+fixture remains directly blocked as `NKitSource`. Separate malformed-placeholder and missing-data-
+partition fixtures remain blocked, and the N5 preview/execution test reaches Ready only for the
+validated playable case while retaining the archival assessment.
+
+After the change, Kirby no longer fails as external recovery required. Its read-only assessment
+reports playable reconstruction with a synthetic non-game region and external archival update
+recovery still required. The factory then reaches the next independent retail construct and stops:
+the retained data partition has raw size `0x107ba0000` (4,424,597,504 bytes), consisting of 2,109
+complete 2 MiB groups plus a 52-cluster (`0x1a0000`) final partial group. N4 currently requires the
+raw size to be an exact complete-group multiple, so Kirby now returns `UnsupportedPartitionLayout`
+at compact data offset `0x78000`. It does not yet reach Ready, and O1 deliberately does not combine
+partial-final-group support with the removed-update policy fix.
+
+### Exact O2 boundary
+
+O2 should implement canonical partial-final-group reconstruction generically: validate the NKit
+stored geometry and final-group hash/H3 semantics, reconstruct and encrypt only the represented
+final clusters while providing the correct conventional partition-size view, add a legal
+synthetic 2,109-complete-group-plus-52-cluster shape without allocating retail-sized test data, and
+reassess Kirby read-only. It must not relax exceptional hash/scrub, additional-partition,
+compressed-outer, dual-layer, nested-directory, GameCube, NKit 2, or recovery-download boundaries.

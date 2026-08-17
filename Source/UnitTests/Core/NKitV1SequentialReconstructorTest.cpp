@@ -689,6 +689,29 @@ SyntheticN4NKitFixture BuildSyntheticN4NKitFixture(
   return fixture;
 }
 
+// Reproduces the format-level construct observed in ordinary retail NKit v1 images without using
+// any retail bytes: the update partition is removed, its CRC remains at 0x218, and a canonical
+// 32 KiB placeholder preserves the original two-entry partition table. The retained data
+// partition and all payload bytes remain identical to the independent N4 fixture.
+SyntheticN4NKitFixture BuildSyntheticRemovedUpdateNKitFixture(
+    const SyntheticN4NKitFixture& self_contained)
+{
+  SyntheticN4NKitFixture fixture = self_contained;
+  fixture.bytes = std::make_shared<std::vector<u8>>(*self_contained.bytes);
+  std::span<u8> placeholder(*fixture.bytes);
+  placeholder = placeholder.subspan(WII_NKIT_V1_HEADER_SIZE,
+                                    SOURCE_PARTITION_OFFSET - WII_NKIT_V1_HEADER_SIZE);
+  std::ranges::fill(placeholder, 0);
+  WriteBigEndianU32(placeholder, 0, 2);
+  WriteBigEndianU32(placeholder, 4, 0x40020 / 4);
+  WriteBigEndianU32(placeholder, 0x20, WII_NKIT_V1_HEADER_SIZE / 4);
+  WriteBigEndianU32(placeholder, 0x24, PARTITION_UPDATE);
+  WriteBigEndianU32(placeholder, 0x28, ORIGINAL_PARTITION_OFFSET / 4);
+  WriteBigEndianU32(placeholder, 0x2c, PARTITION_DATA);
+  WriteBigEndianU32(*fixture.bytes, 0x218, 0xa1b2c3d4);
+  return fixture;
+}
+
 struct PlannedFixture
 {
   NKitV1Analysis analysis;
@@ -1066,7 +1089,7 @@ TEST_F(NKitV1SequentialProofTest, RejectsMalformedGeometryFlagsRangesTruncationA
   }
 }
 
-TEST_F(NKitV1SequentialProofTest, RecoveryRequiredSourceCannotEnterSelfContainedPath)
+TEST_F(NKitV1SequentialProofTest, RemovedUpdateWithoutCanonicalPlaceholderIsRejected)
 {
   SyntheticNKitV1Fixture fixture = s_nkit;
   fixture.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
@@ -1078,7 +1101,7 @@ TEST_F(NKitV1SequentialProofTest, RecoveryRequiredSourceCannotEnterSelfContained
   ASSERT_TRUE(foundation.has_value());
   auto plan = BuildWiiNKitV1SequentialReconstructionPlan(*source, *foundation);
   ASSERT_FALSE(plan.has_value());
-  EXPECT_EQ(plan.error().code, NKitV1ErrorCode::ExternalRecoveryRequired);
+  EXPECT_EQ(plan.error().code, NKitV1ErrorCode::InvalidRemovedUpdatePlaceholder);
 }
 
 TEST_F(NKitV1SequentialProofTest, CancellationStopsBeforePublishingCompleteOutput)
@@ -1362,14 +1385,104 @@ TEST_F(NKitV1RandomAccessTest, SourceMutationAndCancellationFailSafely)
   EXPECT_EQ(prewarm_result.error().code, NKitV1ErrorCode::Cancelled);
 }
 
-TEST_F(NKitV1RandomAccessTest, RecoveryRequiredSourceCannotCreateProductionReader)
+TEST_F(NKitV1RandomAccessTest,
+       O1RemovedUpdateIsPlayableWhileArchivalRecoveryRemainsRequired)
 {
-  SyntheticN4NKitFixture recovery = s_nkit;
-  recovery.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
-  WriteBigEndianU32(*recovery.bytes, 0x218, 0xa1b2c3d4);
-  auto result = TryCreateWiiNKitV1ReconstructedReader(recovery.MakeReader());
-  ASSERT_FALSE(result.has_value());
-  EXPECT_EQ(result.error().code, NKitV1ErrorCode::ExternalRecoveryRequired);
+  const SyntheticN4NKitFixture removed_update =
+      BuildSyntheticRemovedUpdateNKitFixture(s_nkit);
+  std::unique_ptr<BlobReader> compact_reader = removed_update.MakeReader();
+  auto metadata = AnalyzeWiiNKitV1(*compact_reader);
+  ASSERT_TRUE(metadata.has_value());
+  EXPECT_EQ(metadata->GetRecoveryAssessment().GetPlayableAssessment(),
+            NKitV1PlayableAssessment::SyntheticNonGameRegionsRequired);
+  EXPECT_EQ(metadata->GetRecoveryAssessment().GetArchivalAssessment(),
+            NKitV1ArchivalAssessment::ExternalUpdateRecoveryRequired);
+  EXPECT_EQ(metadata->GetRecoveryAssessment().GetRecoveryRequirement(),
+            NKitV1RecoveryRequirement::RemovedUpdatePartition);
+
+  std::unique_ptr<VolumeDisc> compact = CreateDisc(removed_update.MakeReader());
+  ASSERT_NE(compact, nullptr);
+  EXPECT_TRUE(compact->IsNKit());
+  EXPECT_EQ(AnalyzeWbfs(*compact).GetError(), WbfsAnalysisError::NKitSource);
+
+  auto created = TryCreateWiiNKitV1ReconstructedReader(removed_update.MakeReader());
+  ASSERT_TRUE(created.has_value());
+  const NKitV1SequentialReconstructionPlan& plan = (*created)->GetIndex().GetPlan();
+  EXPECT_EQ(plan.GetFoundationPlan().GetRecoveryAssessment().GetArchivalAssessment(),
+            NKitV1ArchivalAssessment::ExternalUpdateRecoveryRequired);
+  ASSERT_EQ(plan.GetDiscSpansBeforePartition().size(), 1u);
+  EXPECT_EQ(plan.GetDiscSpansBeforePartition()[0].GetKind(),
+            NKitV1SequentialSpanKind::Fill);
+  EXPECT_EQ(plan.GetDiscSpansBeforePartition()[0].GetReconstructedOffset(),
+            WII_NKIT_V1_HEADER_SIZE);
+  EXPECT_EQ(plan.GetDiscSpansBeforePartition()[0].GetLength(),
+            ORIGINAL_PARTITION_OFFSET - WII_NKIT_V1_HEADER_SIZE);
+
+  std::vector<u8> synthetic_non_game_region(
+      static_cast<size_t>(ORIGINAL_PARTITION_OFFSET - WII_NKIT_V1_HEADER_SIZE), 0xff);
+  ASSERT_TRUE((*created)->Read(WII_NKIT_V1_HEADER_SIZE, synthetic_non_game_region.size(),
+                               synthetic_non_game_region.data()));
+  EXPECT_TRUE(std::ranges::all_of(synthetic_non_game_region,
+                                  [](u8 byte) { return byte == 0; }));
+
+  std::unique_ptr<VolumeDisc> volume = CreateDisc((*created)->CopyReader());
+  ASSERT_NE(volume, nullptr);
+  EXPECT_EQ(volume->GetGameID(), "RN4P01");
+  EXPECT_FALSE(volume->IsNKit());
+  const Partition partition = volume->GetGamePartition();
+  ASSERT_NE(partition, PARTITION_NONE);
+  EXPECT_EQ(partition.offset, ORIGINAL_PARTITION_OFFSET);
+  EXPECT_TRUE(volume->CheckBlockIntegrity(0, partition));
+  EXPECT_TRUE(volume->CheckH3TableIntegrity(partition));
+  ExpectFile(*volume, partition, "alpha.bin", N4_FILE_A, N4_FILE_A_OFFSET);
+  ExpectFile(*volume, partition, "beta.bin", N4_FILE_B, N4_FILE_B_OFFSET);
+  ExpectFile(*volume, partition, "charlie.bin", N4_FILE_C, N4_FILE_C_OFFSET);
+
+  std::array<u8, 0x200> actual_partition{};
+  std::array<u8, 0x200> oracle_partition{};
+  ASSERT_TRUE((*created)->Read(ORIGINAL_PARTITION_OFFSET, actual_partition.size(),
+                               actual_partition.data()));
+  ASSERT_TRUE(s_conventional.MakeReader()->Read(ORIGINAL_PARTITION_OFFSET,
+                                                 oracle_partition.size(),
+                                                 oracle_partition.data()));
+  EXPECT_EQ(actual_partition, oracle_partition);
+
+  const WbfsAnalysis analysis = AnalyzeWbfs(*volume);
+  ASSERT_TRUE(analysis.IsSuccessful());
+  const std::string destination = m_temp_directory + "/o1-removed-update.wbfs";
+  const WbfsWriteResult write = WriteWbfs(**created, analysis, destination);
+  ASSERT_EQ(write.status, WbfsWriteStatus::Success);
+  ASSERT_TRUE(File::Exists(destination));
+  std::unique_ptr<VolumeDisc> reopened = CreateDisc(destination);
+  ASSERT_NE(reopened, nullptr);
+  EXPECT_EQ(reopened->GetGameID(), "RN4P01");
+  const Partition reopened_partition = reopened->GetGamePartition();
+  ASSERT_NE(reopened_partition, PARTITION_NONE);
+  ExpectFile(*reopened, reopened_partition, "alpha.bin", N4_FILE_A, N4_FILE_A_OFFSET);
+  ExpectFile(*reopened, reopened_partition, "beta.bin", N4_FILE_B, N4_FILE_B_OFFSET);
+  ExpectFile(*reopened, reopened_partition, "charlie.bin", N4_FILE_C, N4_FILE_C_OFFSET);
+  for (const auto& entry : std::filesystem::directory_iterator(m_temp_directory))
+    EXPECT_FALSE(entry.path().filename().string().starts_with("o1-removed-update.xxx"));
+}
+
+TEST_F(NKitV1RandomAccessTest,
+       O1MalformedPlaceholderAndMissingGameplayDataRemainBlocked)
+{
+  SyntheticN4NKitFixture malformed = BuildSyntheticRemovedUpdateNKitFixture(s_nkit);
+  (*malformed.bytes)[SOURCE_PARTITION_OFFSET - 1] = 1;
+  auto malformed_result = TryCreateWiiNKitV1ReconstructedReader(malformed.MakeReader());
+  ASSERT_FALSE(malformed_result.has_value());
+  EXPECT_EQ(malformed_result.error().code,
+            NKitV1ErrorCode::InvalidRemovedUpdatePlaceholder);
+
+  SyntheticN4NKitFixture missing_game_data =
+      BuildSyntheticRemovedUpdateNKitFixture(s_nkit);
+  WriteBigEndianU32(*missing_game_data.bytes, 0x40000, 0);
+  WriteBigEndianU32(*missing_game_data.bytes, 0x40004, 0);
+  auto missing_result =
+      TryCreateWiiNKitV1ReconstructedReader(missing_game_data.MakeReader());
+  ASSERT_FALSE(missing_result.has_value());
+  EXPECT_EQ(missing_result.error().code, NKitV1ErrorCode::MissingDataPartition);
 }
 
 TEST_F(NKitV1RandomAccessTest, DirectDiscIOAndAnalyzeWbfsSeeConventionalMultipleFileDisc)
@@ -1546,6 +1659,55 @@ TEST_F(NKitV1RandomAccessTest, N5PreparedRecipePresentsOnlyAConventionalWriterSo
   EXPECT_EQ(AnalyzeWbfs(*compact).GetError(), WbfsAnalysisError::NKitSource);
 }
 
+TEST_F(NKitV1RandomAccessTest,
+       O1RemovedUpdatePreviewIsReadyAndRetainsArchivalAssessment)
+{
+  const SyntheticN4NKitFixture removed_update =
+      BuildSyntheticRemovedUpdateNKitFixture(s_nkit);
+  const std::string source_path = m_temp_directory + "/o1-supported.nkit.iso";
+  ASSERT_TRUE(WriteN5Fixture(source_path, removed_update));
+  const auto entry = MakeN5Entry(source_path);
+  const auto preparation = DolphinQt::PrepareWiiExportGameListSource(entry);
+  ASSERT_TRUE(preparation.IsSuccessful());
+  EXPECT_EQ(preparation.nkit_support, DolphinQt::WiiExportNKitV1Support::Supported);
+  ASSERT_TRUE(preparation.prepared_source->recipe.nkit_v1.has_value());
+  EXPECT_TRUE(preparation.prepared_source->recipe.nkit_v1
+                  ->requires_external_archival_recovery);
+  EXPECT_TRUE(preparation.prepared_source->source.requires_external_archival_recovery);
+  EXPECT_FALSE(preparation.prepared_source->source.is_nkit);
+
+  UICommon::WiiExportPreviewModel model(*preparation.prepared_source, N5NoCollisions);
+  ASSERT_TRUE(model.SelectDestination(MakeN5Destination(m_temp_directory)));
+  EXPECT_EQ(model.GetState().readiness, UICommon::WiiExportPreviewReadiness::Ready);
+  EXPECT_EQ(model.GetState().plan.playable_export,
+            UICommon::WiiExportPlayableAssessment::SupportableByCapableBackend);
+  EXPECT_EQ(model.GetState().plan.archival_recovery,
+            UICommon::WiiExportArchivalRecoveryAssessment::
+                ExternalRecoveryDataMayBeRequired);
+  EXPECT_FALSE(model.GetState().plan.requires_nkit_input);
+
+  auto request = DolphinQt::CreateWiiExportGameListExecutionRequest(
+      entry, *preparation.prepared_source, model.GetState());
+  ASSERT_TRUE(request.has_value());
+  const auto result = DolphinQt::RunWiiExportGameListExecution(
+      *request, {}, {}, MakeN5ExecutionServices(m_temp_directory));
+  ASSERT_EQ(result.revalidation_error,
+            DolphinQt::WiiExportGameListRevalidationError::None);
+  ASSERT_TRUE(result.execution.has_value());
+  ASSERT_EQ(result.execution->outcome, UICommon::WiiExportExecutionOutcome::Succeeded);
+  ASSERT_EQ(result.execution->final_relative_paths.size(), 1u);
+  const std::filesystem::path output =
+      std::filesystem::path(m_temp_directory) / result.execution->final_relative_paths.front();
+  std::unique_ptr<VolumeDisc> reopened = CreateDisc(output.string());
+  ASSERT_NE(reopened, nullptr);
+  EXPECT_EQ(reopened->GetGameID(), "RN4P01");
+  const Partition partition = reopened->GetGamePartition();
+  ASSERT_NE(partition, PARTITION_NONE);
+  ExpectFile(*reopened, partition, "alpha.bin", N4_FILE_A, N4_FILE_A_OFFSET);
+  ExpectFile(*reopened, partition, "beta.bin", N4_FILE_B, N4_FILE_B_OFFSET);
+  ExpectFile(*reopened, partition, "charlie.bin", N4_FILE_C, N4_FILE_C_OFFSET);
+}
+
 TEST_F(NKitV1RandomAccessTest, N5DefaultExecutionRebuildsAndWritesValidatedSyntheticWbfs)
 {
   const std::string source_path = m_temp_directory + "/supported.nkit.iso";
@@ -1675,7 +1837,7 @@ TEST_F(NKitV1RandomAccessTest, N5BlockedSupportMatrixReturnsSpecificTypedReasons
   SyntheticN4NKitFixture recovery = s_nkit;
   recovery.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
   WriteBigEndianU32(*recovery.bytes, 0x218, 0xa1b2c3d4);
-  expect(std::move(recovery), DolphinQt::WiiExportNKitV1Support::RecoveryRequired);
+  expect(std::move(recovery), DolphinQt::WiiExportNKitV1Support::Malformed);
 
   SyntheticN4NKitFixture gap = s_nkit;
   gap.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);

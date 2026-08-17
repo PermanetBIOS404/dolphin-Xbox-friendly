@@ -148,7 +148,8 @@ WiiExportPlan CreateWiiExportPlan(const WiiExportSource& source,
   else
   {
     plan.playable_export = WiiExportPlayableAssessment::SupportableByCapableBackend;
-    plan.archival_recovery = source.is_nkit ?
+    plan.archival_recovery =
+        (source.is_nkit || source.requires_external_archival_recovery) ?
                                  WiiExportArchivalRecoveryAssessment::
                                      ExternalRecoveryDataMayBeRequired :
                                  WiiExportArchivalRecoveryAssessment::

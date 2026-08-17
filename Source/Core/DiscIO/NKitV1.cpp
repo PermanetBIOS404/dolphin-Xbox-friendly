@@ -392,6 +392,8 @@ NKitV1Result<NKitV1Analysis> AnalyzeWiiNKitV1(BlobReader& reader)
   {
     analysis.m_recovery_assessment.m_archival_assessment =
         NKitV1ArchivalAssessment::ExternalUpdateRecoveryRequired;
+    analysis.m_recovery_assessment.m_playable_assessment =
+        NKitV1PlayableAssessment::SyntheticNonGameRegionsRequired;
     analysis.m_recovery_assessment.m_recovery_requirement =
         NKitV1RecoveryRequirement::RemovedUpdatePartition;
   }

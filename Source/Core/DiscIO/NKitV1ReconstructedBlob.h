@@ -149,9 +149,11 @@ private:
   std::optional<NKitV1Error> m_last_error;
 };
 
-// Production factory boundary for N5. It identifies exact Wii NKit v1, validates the complete
-// supported record/index set, enforces self-contained recovery policy, and returns a conventional
-// view. It does not alter normal direct-NKit detection or any export capability.
+// Production factory boundary for N5/O1. It identifies exact Wii NKit v1, validates the complete
+// supported record/index set, and returns a conventional view. The supported set includes the
+// canonical removed-update placeholder because that archival loss is outside the retained game
+// partition; malformed placeholders and gameplay-critical loss still fail closed. It does not
+// alter normal direct-NKit detection or any export capability.
 NKitV1Result<std::unique_ptr<NKitV1ReconstructedBlobReader>>
 TryCreateWiiNKitV1ReconstructedReader(
     std::unique_ptr<BlobReader> source,

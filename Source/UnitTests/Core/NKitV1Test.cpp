@@ -357,6 +357,7 @@ TEST(NKitV1Recovery, RetainedUpdateNeedsNoExternalRecoveryAtMetadataLevel)
                 FoundationValidatedPartitionReconstructionPending);
   EXPECT_EQ(assessment.GetArchivalAssessment(),
             NKitV1ArchivalAssessment::NoExternalRecoveryIndicated);
+  EXPECT_EQ(assessment.GetPlayableAssessment(), NKitV1PlayableAssessment::SelfContained);
   EXPECT_EQ(assessment.GetRecoveryRequirement(), NKitV1RecoveryRequirement::None);
 }
 
@@ -367,6 +368,8 @@ TEST(NKitV1Recovery, RemovedUpdateRequiresExternalArchivalRecovery)
   const NKitV1RecoveryAssessment& assessment = result->GetRecoveryAssessment();
   EXPECT_EQ(assessment.GetArchivalAssessment(),
             NKitV1ArchivalAssessment::ExternalUpdateRecoveryRequired);
+  EXPECT_EQ(assessment.GetPlayableAssessment(),
+            NKitV1PlayableAssessment::SyntheticNonGameRegionsRequired);
   EXPECT_EQ(assessment.GetRecoveryRequirement(),
             NKitV1RecoveryRequirement::RemovedUpdatePartition);
 }

@@ -74,6 +74,7 @@ WiiExportNKitV1Support ClassifyNKitError(DiscIO::NKitV1ErrorCode code)
   case Code::InvalidWiiGeometry:
   case Code::InvalidSequentialLayout:
   case Code::InvalidReconstructionIndex:
+  case Code::InvalidRemovedUpdatePlaceholder:
   case Code::IntegrityCheckFailed:
   case Code::OutputWriteFailed:
     return WiiExportNKitV1Support::Malformed;
@@ -145,6 +146,9 @@ UICommon::WiiExportNKitV1SourceRecipe MakeNKitRecipe(
   recipe.compact_raw_size = metadata.GetSourceRawSize();
   recipe.reconstructed_size = index.GetReconstructedSize();
   recipe.partition_group_count = plan.GetPartition().GetGroupCount();
+  recipe.requires_external_archival_recovery =
+      plan.GetFoundationPlan().GetRecoveryAssessment().GetArchivalAssessment() ==
+      DiscIO::NKitV1ArchivalAssessment::ExternalUpdateRecoveryRequired;
   recipe.compact_header_fingerprint =
       plan.GetFoundationPlan().GetSourceHeaderFingerprint();
   recipe.reconstruction_recipe_fingerprint =
@@ -282,6 +286,8 @@ WiiExportGameListSourcePreparation PrepareWiiExportGameListSource(
   // The planner/backend consume the prepared conventional view. The compact origin is retained in
   // recipe and never advertised as direct native-writer input.
   prepared.source.is_nkit = false;
+  prepared.source.requires_external_archival_recovery =
+      recipe.nkit_v1 && recipe.nkit_v1->requires_external_archival_recovery;
   prepared.source.expected_wbfs_size_bytes = analysis->GetExpectedOutputSize();
   prepared.analysis = std::move(analysis);
   prepared.recipe = std::move(recipe);

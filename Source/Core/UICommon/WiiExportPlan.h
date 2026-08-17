@@ -83,6 +83,9 @@ struct WiiExportSource
   std::string source_path;
   DiscIO::BlobType blob_type = DiscIO::BlobType::PLAIN;
   bool is_nkit = false;
+  // The prepared conventional view can be playable even when its compact NKit origin still needs
+  // external data for byte-identical archival restoration.
+  bool requires_external_archival_recovery = false;
   u64 expected_wbfs_size_bytes = 0;
 };
 

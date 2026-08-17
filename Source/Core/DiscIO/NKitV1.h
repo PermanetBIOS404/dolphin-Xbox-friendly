@@ -60,6 +60,7 @@ enum class NKitV1ErrorCode
   UnsupportedGapContext,
   InvalidSequentialLayout,
   InvalidReconstructionIndex,
+  InvalidRemovedUpdatePlaceholder,
   SourceIdentityMismatch,
   IntegrityCheckFailed,
   OutputWriteFailed,
@@ -165,6 +166,15 @@ enum class NKitV1ArchivalAssessment
   ExternalUpdateRecoveryRequired,
 };
 
+// Playable reconstruction and archival recovery are deliberately independent. A removed update
+// partition can require external data for byte-identical archival restoration while the retained
+// data partition remains sufficient for a conventional playable view.
+enum class NKitV1PlayableAssessment
+{
+  SelfContained,
+  SyntheticNonGameRegionsRequired,
+};
+
 enum class NKitV1RecoveryRequirement
 {
   None,
@@ -179,6 +189,7 @@ public:
     return m_reconstruction_readiness;
   }
   NKitV1ArchivalAssessment GetArchivalAssessment() const { return m_archival_assessment; }
+  NKitV1PlayableAssessment GetPlayableAssessment() const { return m_playable_assessment; }
   NKitV1RecoveryRequirement GetRecoveryRequirement() const { return m_recovery_requirement; }
 
 private:
@@ -192,6 +203,7 @@ private:
       NKitV1ReconstructionReadiness::FoundationValidatedPartitionReconstructionPending;
   NKitV1ArchivalAssessment m_archival_assessment =
       NKitV1ArchivalAssessment::NoExternalRecoveryIndicated;
+  NKitV1PlayableAssessment m_playable_assessment = NKitV1PlayableAssessment::SelfContained;
   NKitV1RecoveryRequirement m_recovery_requirement = NKitV1RecoveryRequirement::None;
 };
 

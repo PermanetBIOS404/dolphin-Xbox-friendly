@@ -488,6 +488,22 @@ TEST(WiiExportPlan, NKitSourceSeparatesPlayableExportFromArchivalRecovery)
   EXPECT_TRUE(HasCapability(plan, WiiExportBackendCapability::NKitInput));
 }
 
+TEST(WiiExportPlan, ReconstructedViewPreservesExternalArchivalRecoveryTruth)
+{
+  WiiExportSource source = MakeSource();
+  source.blob_type = DiscIO::BlobType::PLAIN;
+  source.requires_external_archival_recovery = true;
+
+  const WiiExportPlan plan = UICommon::CreateWiiExportPlan(source, MakeDestination());
+
+  ASSERT_TRUE(plan.succeeded);
+  EXPECT_EQ(WiiExportPlayableAssessment::SupportableByCapableBackend, plan.playable_export);
+  EXPECT_EQ(WiiExportArchivalRecoveryAssessment::ExternalRecoveryDataMayBeRequired,
+            plan.archival_recovery);
+  EXPECT_FALSE(plan.requires_nkit_input);
+  EXPECT_FALSE(HasCapability(plan, WiiExportBackendCapability::NKitInput));
+}
+
 TEST(WiiExportPlan, BackendCapabilitiesReflectSingleAndSplitOutput)
 {
   const WiiExportPlan single = UICommon::CreateWiiExportPlan(MakeSource(), MakeDestination());

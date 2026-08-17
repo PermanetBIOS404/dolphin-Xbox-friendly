@@ -32,6 +32,7 @@ struct WiiExportNKitV1SourceRecipe final
   u64 compact_raw_size = 0;
   u64 reconstructed_size = 0;
   u64 partition_group_count = 0;
+  bool requires_external_archival_recovery = false;
   Common::SHA1::Digest compact_header_fingerprint{};
   Common::SHA1::Digest reconstruction_recipe_fingerprint{};
 

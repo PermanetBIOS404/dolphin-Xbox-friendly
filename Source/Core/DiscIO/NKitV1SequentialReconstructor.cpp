@@ -38,6 +38,12 @@ constexpr u64 MAX_COMPACTED_PARTITION_SIZE = 16 * 1024 * 1024;
 constexpr u64 MAX_PREFIX_ENCODING_SIZE = 1024 * 1024;
 constexpr u64 MAX_FST_SIZE = 1024 * 1024;
 constexpr u64 MAX_FILE_SIZE = 4 * 1024 * 1024;
+constexpr u64 REMOVED_UPDATE_PLACEHOLDER_SIZE = 0x8000;
+constexpr u64 SAVED_PARTITION_TABLE_OFFSET = 0x40000;
+constexpr u64 SAVED_PARTITION_TABLE_SIZE = 0x100;
+constexpr u64 PARTITION_TABLE_ENTRY_SIZE = 8;
+constexpr u64 PARTITION_TABLE_DESCRIPTOR_SIZE = 8;
+constexpr u32 PARTITION_TABLE_COUNT = 4;
 constexpr u32 MAX_FST_ENTRIES = 4096;
 constexpr size_t IO_CHUNK_SIZE = 64 * 1024;
 constexpr u64 CANONICAL_LEADING_NULLS = 0x1c;
@@ -160,6 +166,128 @@ NKitV1Result<void> ValidateSpanCoverage(std::span<const NKitV1SequentialSpan> sp
   return {};
 }
 
+// NKit v1 stores the original 0x40000 partition-table region in a 32 KiB zero-padded placeholder
+// when it removes an update partition. This is behaviorally compatible with NKit at commit
+// 61dd683b4b70273a37c4513726b87943f2e32e37 (WiiPartitionPlaceHolder/NkitReaderWii). The saved table
+// is authoritative for the retained data partition's conventional offset, but the removed update
+// itself remains absent and is represented by a zero-filled non-game address-space range.
+NKitV1Result<u64> ParseRemovedUpdatePlaceholder(
+    std::span<const u8> placeholder, const NKitV1PartitionMetadata& retained_partition,
+    u64 reconstructed_size)
+{
+  constexpr u32 partition_index = 0;
+  if (placeholder.size() != REMOVED_UPDATE_PLACEHOLDER_SIZE ||
+      !std::all_of(placeholder.begin() + SAVED_PARTITION_TABLE_SIZE, placeholder.end(),
+                   [](u8 byte) { return byte == 0; }))
+  {
+    return std::unexpected(
+        Error(NKitV1ErrorCode::InvalidRemovedUpdatePlaceholder, WII_NKIT_V1_HEADER_SIZE,
+              partition_index));
+  }
+
+  u32 saved_entry_count = 0;
+  u64 saved_table_offset = 0;
+  for (u32 table = 0; table < PARTITION_TABLE_COUNT; ++table)
+  {
+    const size_t descriptor = table * PARTITION_TABLE_DESCRIPTOR_SIZE;
+    const u32 count = ReadBigEndianU32(placeholder, descriptor);
+    const u32 offset_quads = ReadBigEndianU32(placeholder, descriptor + 4);
+    if (table != retained_partition.GetTableIndex())
+    {
+      if (count != 0 || offset_quads != 0)
+      {
+        return std::unexpected(
+            Error(NKitV1ErrorCode::UnsupportedAdditionalPartitions,
+                  WII_NKIT_V1_HEADER_SIZE + descriptor, partition_index));
+      }
+      continue;
+    }
+
+    if (!CheckedMultiply(offset_quads, 4, &saved_table_offset) ||
+        saved_table_offset < SAVED_PARTITION_TABLE_OFFSET ||
+        saved_table_offset >= SAVED_PARTITION_TABLE_OFFSET + SAVED_PARTITION_TABLE_SIZE)
+    {
+      return std::unexpected(
+          Error(NKitV1ErrorCode::InvalidRemovedUpdatePlaceholder,
+                WII_NKIT_V1_HEADER_SIZE + descriptor + 4, partition_index));
+    }
+    saved_entry_count = count;
+  }
+
+  if (saved_entry_count != 2)
+  {
+    return std::unexpected(
+        Error(saved_entry_count > 2 ? NKitV1ErrorCode::UnsupportedAdditionalPartitions :
+                                     NKitV1ErrorCode::InvalidRemovedUpdatePlaceholder,
+              WII_NKIT_V1_HEADER_SIZE, partition_index));
+  }
+
+  const u64 local_table_offset = saved_table_offset - SAVED_PARTITION_TABLE_OFFSET;
+  u64 saved_table_bytes = 0;
+  if (!CheckedMultiply(saved_entry_count, PARTITION_TABLE_ENTRY_SIZE, &saved_table_bytes) ||
+      local_table_offset > SAVED_PARTITION_TABLE_SIZE ||
+      saved_table_bytes > SAVED_PARTITION_TABLE_SIZE - local_table_offset)
+  {
+    return std::unexpected(
+        Error(NKitV1ErrorCode::InvalidRemovedUpdatePlaceholder,
+              WII_NKIT_V1_HEADER_SIZE + local_table_offset, partition_index));
+  }
+
+  bool found_update = false;
+  bool found_data = false;
+  u64 reconstructed_partition_offset = 0;
+  for (u32 entry = 0; entry < saved_entry_count; ++entry)
+  {
+    const size_t entry_offset = static_cast<size_t>(local_table_offset) +
+                                entry * PARTITION_TABLE_ENTRY_SIZE;
+    u64 partition_offset = 0;
+    if (!CheckedMultiply(ReadBigEndianU32(placeholder, entry_offset), 4, &partition_offset))
+    {
+      return std::unexpected(
+          Error(NKitV1ErrorCode::ArithmeticOverflow,
+                WII_NKIT_V1_HEADER_SIZE + entry_offset, partition_index));
+    }
+    const u32 type = ReadBigEndianU32(placeholder, entry_offset + 4);
+    if (type == PARTITION_UPDATE)
+    {
+      if (found_update || partition_offset != WII_NKIT_V1_HEADER_SIZE)
+      {
+        return std::unexpected(
+            Error(NKitV1ErrorCode::InvalidRemovedUpdatePlaceholder,
+                  WII_NKIT_V1_HEADER_SIZE + entry_offset, partition_index));
+      }
+      found_update = true;
+    }
+    else if (type == PARTITION_DATA)
+    {
+      if (found_data || partition_offset < WII_NKIT_V1_HEADER_SIZE ||
+          partition_offset % VolumeWii::BLOCK_TOTAL_SIZE != 0 ||
+          partition_offset >= reconstructed_size)
+      {
+        return std::unexpected(
+            Error(NKitV1ErrorCode::InvalidRemovedUpdatePlaceholder,
+                  WII_NKIT_V1_HEADER_SIZE + entry_offset, partition_index));
+      }
+      found_data = true;
+      reconstructed_partition_offset = partition_offset;
+    }
+    else
+    {
+      return std::unexpected(
+          Error(NKitV1ErrorCode::UnsupportedAdditionalPartitions,
+                WII_NKIT_V1_HEADER_SIZE + entry_offset, partition_index));
+    }
+  }
+
+  if (!found_update || !found_data || reconstructed_partition_offset <= WII_NKIT_V1_HEADER_SIZE)
+  {
+    return std::unexpected(
+        Error(NKitV1ErrorCode::InvalidRemovedUpdatePlaceholder, WII_NKIT_V1_HEADER_SIZE,
+              partition_index));
+  }
+  return reconstructed_partition_offset;
+}
+
 NKitV1Result<void> MaterializeDecryptedGroup(
     BlobReader& source, const NKitV1SequentialPartition& partition, u64 group_index,
     std::array<std::array<u8, VolumeWii::BLOCK_DATA_SIZE>, VolumeWii::BLOCKS_PER_GROUP>* output,
@@ -251,8 +379,10 @@ BuildWiiNKitV1SequentialReconstructionPlan(
 {
   constexpr u32 partition_index = 0;
   const NKitV1Metadata& metadata = foundation_plan.GetMetadata();
-  if (foundation_plan.GetRecoveryAssessment().GetRecoveryRequirement() !=
-      NKitV1RecoveryRequirement::None)
+  const NKitV1RecoveryRequirement recovery_requirement =
+      foundation_plan.GetRecoveryAssessment().GetRecoveryRequirement();
+  if (recovery_requirement != NKitV1RecoveryRequirement::None &&
+      recovery_requirement != NKitV1RecoveryRequirement::RemovedUpdatePartition)
   {
     return std::unexpected(Error(NKitV1ErrorCode::ExternalRecoveryRequired));
   }
@@ -360,30 +490,46 @@ BuildWiiNKitV1SequentialReconstructionPlan(
                             MAX_PREFIX_ENCODING_SIZE, partition_index);
   if (!prefix)
     return std::unexpected(prefix.error());
-  NKitV1GapDecodeOptions prefix_options;
-  prefix_options.address_space = NKitV1GapAddressSpace::Disc;
-  prefix_options.reconstructed_offset = WII_NKIT_V1_HEADER_SIZE;
-  prefix_options.encoded_source_offset = WII_NKIT_V1_HEADER_SIZE;
-  prefix_options.maximum_reconstructed_size = foundation_plan.GetReconstructedSize();
-  auto decoded_prefix = DecodeNKitV1Gap(*prefix, prefix_options);
-  if (!decoded_prefix)
-    return std::unexpected(decoded_prefix.error());
-  if (!std::all_of(prefix->begin() + decoded_prefix->GetEncodedBytesConsumed(), prefix->end(),
-                   [](u8 byte) { return byte == 0; }))
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
-                                 WII_NKIT_V1_HEADER_SIZE +
-                                     decoded_prefix->GetEncodedBytesConsumed(),
-                                 partition_index));
-  }
-
   u64 reconstructed_partition_offset = 0;
-  if (!CheckedAdd(WII_NKIT_V1_HEADER_SIZE, decoded_prefix->GetReconstructedBytes(),
-                  &reconstructed_partition_offset) ||
-      reconstructed_partition_offset % VolumeWii::BLOCK_TOTAL_SIZE != 0)
+  std::vector<NKitV1SequentialSpan> disc_spans_before_partition;
+  if (recovery_requirement == NKitV1RecoveryRequirement::RemovedUpdatePartition)
   {
-    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
-                                 WII_NKIT_V1_HEADER_SIZE, partition_index));
+    auto parsed = ParseRemovedUpdatePlaceholder(*prefix, source_partition,
+                                                foundation_plan.GetReconstructedSize());
+    if (!parsed)
+      return std::unexpected(parsed.error());
+    reconstructed_partition_offset = *parsed;
+
+    NKitV1SequentialSpan synthetic_non_game_region;
+    synthetic_non_game_region.m_address_space = NKitV1GapAddressSpace::Disc;
+    synthetic_non_game_region.m_reconstructed_offset = WII_NKIT_V1_HEADER_SIZE;
+    synthetic_non_game_region.m_length =
+        reconstructed_partition_offset - WII_NKIT_V1_HEADER_SIZE;
+    synthetic_non_game_region.m_kind = NKitV1SequentialSpanKind::Fill;
+    synthetic_non_game_region.m_fill_byte = 0;
+    disc_spans_before_partition.emplace_back(std::move(synthetic_non_game_region));
+  }
+  else
+  {
+    NKitV1GapDecodeOptions prefix_options;
+    prefix_options.address_space = NKitV1GapAddressSpace::Disc;
+    prefix_options.reconstructed_offset = WII_NKIT_V1_HEADER_SIZE;
+    prefix_options.encoded_source_offset = WII_NKIT_V1_HEADER_SIZE;
+    prefix_options.maximum_reconstructed_size = foundation_plan.GetReconstructedSize();
+    auto decoded_prefix = DecodeNKitV1Gap(*prefix, prefix_options);
+    if (!decoded_prefix)
+      return std::unexpected(decoded_prefix.error());
+    if (!std::all_of(prefix->begin() + decoded_prefix->GetEncodedBytesConsumed(), prefix->end(),
+                     [](u8 byte) { return byte == 0; }) ||
+        !CheckedAdd(WII_NKIT_V1_HEADER_SIZE, decoded_prefix->GetReconstructedBytes(),
+                    &reconstructed_partition_offset) ||
+        reconstructed_partition_offset % VolumeWii::BLOCK_TOTAL_SIZE != 0)
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
+                                   WII_NKIT_V1_HEADER_SIZE, partition_index));
+    }
+    disc_spans_before_partition =
+        convert_gap_spans(decoded_prefix->GetSpans(), false, true);
   }
 
   auto partition_header =
@@ -777,8 +923,7 @@ BuildWiiNKitV1SequentialReconstructionPlan(
   }
   WriteBigEndianU32(plan.m_reconstructed_disc_header, static_cast<size_t>(table_offset),
                     static_cast<u32>(reconstructed_partition_offset / 4));
-  plan.m_disc_spans_before_partition =
-      convert_gap_spans(decoded_prefix->GetSpans(), false, true);
+  plan.m_disc_spans_before_partition = std::move(disc_spans_before_partition);
   plan.m_disc_spans_after_partition = convert_gap_spans(disc_tail->GetSpans(), false, true);
   return plan;
 }

@@ -175,8 +175,9 @@ struct NKitV1SequentialReconstructionResult final
 
 // The N4 production subset supports one normal-hash data partition, multiple complete raw
 // 64-cluster groups, root-level regular FST files, canonical leading-null gap context, no
-// exceptional preserved hashes, and no external recovery requirement. It remains a conservative
-// v1 subset.
+// exceptional preserved hashes, and either a self-contained disc prefix or the canonical removed
+// update-partition placeholder. The latter produces a playable conventional view with a synthetic
+// zero-filled non-game region while preserving its external archival-recovery assessment.
 NKitV1Result<NKitV1SequentialReconstructionPlan>
 BuildWiiNKitV1SequentialReconstructionPlan(
     BlobReader& source, const NKitV1ReconstructionPlan& foundation_plan,
