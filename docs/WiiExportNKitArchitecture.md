@@ -1473,3 +1473,109 @@ The isolated Ninja `RelWithDebInfo` configuration has tests and Qt enabled. O2 f
 family is 186/186; and representative Physical SD smoke is 3/3. The full Dolphin suite was not run
 because the bounded affected matrix was green. Both aggregate tests and the production
 `dolphin-emu` target are required to link with every build invocation limited to `-j2`.
+
+## 21. O3 retail compatibility: nested-directory FST traversal
+
+O2 stopped on Kirby's first non-root FST record: entry 1 at compact source `0x9a070c` is the
+directory `bggimmick` (parent 0, exclusive subtree end 352), while the production planner required
+every non-root record to be a regular file. That byte-type check returned
+`UnsupportedGapContext` before any regular files could be planned. O3 replaces the root-files-only
+scan with a validated iterative FST parser; it does not ignore, flatten, or synthesize directory
+records.
+
+### Validated directory model and canonical ordering
+
+Dolphin's `FileSystemGCWii` implementation is the primary authority for the 12-byte Wii FST
+record. The high byte of word 0 identifies a directory and its low 24 bits index the NUL-terminated
+name table. For a regular file, words 1 and 2 are the word-scaled file offset and byte length. For
+a directory, word 1 is the parent directory entry and word 2 is the exclusive entry index after
+the directory's complete preorder subtree. Root is directory entry 0, has parent 0, and its end
+field supplies the complete entry count. Empty directories therefore have end `index + 1`;
+sibling and nested directories are delimited by their exclusive end indexes.
+
+The pinned MIT NKit-v1 reference (`NKit/FilesAndStreams/FileSystem.cs`,
+`NKit/Conversion/NkitFormat.cs`, and `NKit/Conversion/Readers/NkitReaderWii.cs`) confirms that
+reconstruction traverses the FST to discover regular files, then orders those files by compact
+physical offset and length. Directory entries consume no compact body bytes. The conventional FST
+is preserved in place and only the offset word of each regular-file entry is patched. Thus FST
+preorder may differ from compact/physical file order without changing the hierarchy.
+
+`NKitV1FstEntry` is the immutable compact production descriptor: entry index/type, validated
+parent and exclusive subtree end, name offset/length, directory depth, and regular-file compact
+offset/size. `NKitV1SequentialPartition` retains the descriptors in original FST order plus
+directory/file/depth statistics. Preview/execution recipe identity now hashes this complete
+directory-aware representation.
+
+Validation uses an active-directory index stack rather than recursion. It rejects an invalid root
+type/parent/count, unknown entry type, parent mismatch or non-ancestor parent, non-forward or
+out-of-parent subtree end, impossible nesting, entry/name-table arithmetic overflow, out-of-table
+or unterminated/empty non-root names, truncated entry/string tables, and file offsets or extents
+outside validated compact and reconstructed bounds. Only regular files enter the physical sort or
+source-span sequence. Complexity is `O(n + f log f)` time and `O(n + f + depth)` descriptor
+memory; traversal itself has no recursive stack or quadratic subtree walk.
+
+O3 also verified one directory-aware gap boundary exposed immediately after the directory fix.
+Kirby first advanced from `0x9a070c` to `UnexpectedEndOfInput` at `0x9fd460`. Metadata showed that
+the preceding aligned regular file ends at compact offset `0x985460` relative to partition data
+and the next file begins at exactly that offset. Canonical `NkitReaderWii.writeGap` returns zero
+without reading a record when its calculated gap length is zero. Production now applies that
+format-wide rule: adjacent aligned regular files consume no gap record and add no reconstructed
+span. Nonzero gaps retain all existing bounded decoding, leading-null, junk-file, padding, and
+malformed-record checks.
+
+### Synthetic proof and malformed matrix
+
+The independent small oracle contains the invented `RO3P01` hierarchy:
+
+```text
+/
+|-- root.bin
+|-- dir_a/
+|   |-- alpha.bin
+|   `-- dir_b/
+|       `-- beta.bin
+|-- dir_c/
+|   `-- gamma.bin
+`-- empty_dir/
+```
+
+Its FST traversal order differs deliberately from compact physical order
+(`gamma`, `root`, `beta`, `alpha`), and `beta`/`alpha` are physically adjacent with no encoded gap.
+The test-only encoder preserves directory records and independently compacts only regular files.
+The reconstructed FST matches the conventional oracle byte-for-byte: root, parents, subtree ends,
+name table, file sizes, and restored file offsets. Normal DiscIO exposes all directories including
+the empty directory and reads the root, nested, and deepest file bytes exactly. Random/cache reads,
+unchanged `AnalyzeWbfs`, unchanged `WriteWbfs`, WBFS reopen, nested file reads, cancellation, and
+staging cleanup all pass.
+
+A second generated fixture contains exactly 3,000 FST entries (2,996 directories including root,
+four regular files, and depth 2) while reusing tiny generated bodies. Its final immutable entry
+vector is 144,000 bytes (3,000 descriptors at 48 bytes); planning remains bounded by the existing
+partition-prefix cap and does not allocate per-file bodies. The focused malformed matrix covers
+root, parent, subtree, type, filename offset/termination, truncated table/string data, compact file
+range/overlap, and nested-gap failures.
+
+### Kirby read-only reassessment and next boundary
+
+The authorized Kirby source validates with 2,964 FST entries: 160 directories, 2,804 regular
+files, maximum directory depth 4, and largest observed directory subtree span 1,264 entries. The
+production plan contains all 2,110 partition groups and 2,114 reconstructed index ranges. Reader
+creation succeeds; normal DiscIO opens ID6 `RK5E01`, reports `IsNKit() == false`, and unchanged
+`AnalyzeWbfs` returns success. N5 preview preparation classifies the source as supported and reaches
+Ready. The source remained read-only and no retail ISO or WBFS was created.
+
+O3 therefore reveals no independent O4 blocker for Kirby. The next action is the separately
+controlled manual Kirby NKit-to-WBFS acceptance run after review. A future O4 should be opened only
+from concrete evidence produced by that acceptance run or another authorized retail probe—for
+example junk-file removal, exceptional scrub/hash state, or another partition/layout construct—and
+must again implement the generic format rule rather than a title-specific exception.
+
+### O3 validation checkpoint
+
+The isolated Ninja `RelWithDebInfo` configuration has tests and Qt enabled. O3 focused coverage is
+3/3; O2 is 4/4; O1 is 7/7; N5 is 6/6; N4 is 8/8; N3 is 10/10; and N2 is 43/43. The complete
+affected NKit/Wii Export/WBFS matrix is 260/260 (the O2 checkpoint's 257 plus the three O3 tests),
+and representative Physical SD smoke is 3/3. The full Dolphin suite was not run because the
+bounded affected matrix is green. Aggregate tests and the production `dolphin-emu` executable
+link successfully, with all compilation limited to `-j2` and final single-process link steps below
+that ceiling. Kirby's before/after SHA-256, size, and nanosecond mtime match exactly.

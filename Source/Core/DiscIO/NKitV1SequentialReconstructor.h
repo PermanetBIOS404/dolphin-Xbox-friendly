@@ -67,6 +67,46 @@ private:
   u64 m_reconstructed_file_offset = 0;
 };
 
+enum class NKitV1FstEntryType
+{
+  File,
+  Directory,
+};
+
+// A compact validated description of one original FST record. Directory records retain their
+// parent/subtree fields and never consume compact file data. File records are later ordered by
+// compacted offset for canonical NKit-v1 reconstruction, independently of FST traversal order.
+class NKitV1FstEntry final
+{
+public:
+  u32 GetIndex() const { return m_index; }
+  NKitV1FstEntryType GetType() const { return m_type; }
+  bool IsDirectory() const { return m_type == NKitV1FstEntryType::Directory; }
+  u32 GetParentIndex() const { return m_parent_index; }
+  u32 GetSubtreeEndIndex() const { return m_subtree_end_index; }
+  u32 GetNameOffset() const { return m_name_offset; }
+  u32 GetNameLength() const { return m_name_length; }
+  u32 GetDirectoryDepth() const { return m_directory_depth; }
+  u64 GetCompactedFileOffset() const { return m_compacted_file_offset; }
+  u64 GetFileSize() const { return m_file_size; }
+
+private:
+  friend NKitV1Result<class NKitV1SequentialReconstructionPlan>
+  BuildWiiNKitV1SequentialReconstructionPlan(
+      BlobReader& source, const NKitV1ReconstructionPlan& foundation_plan,
+      const std::function<bool()>& cancellation_callback);
+
+  u32 m_index = 0;
+  NKitV1FstEntryType m_type = NKitV1FstEntryType::File;
+  u32 m_parent_index = 0;
+  u32 m_subtree_end_index = 0;
+  u32 m_name_offset = 0;
+  u32 m_name_length = 0;
+  u32 m_directory_depth = 0;
+  u64 m_compacted_file_offset = 0;
+  u64 m_file_size = 0;
+};
+
 class NKitV1PartitionGroupGeometry final
 {
 public:
@@ -116,6 +156,10 @@ public:
   {
     return m_fst_offset_patches;
   }
+  const std::vector<NKitV1FstEntry>& GetFstEntries() const { return m_fst_entries; }
+  u32 GetFstDirectoryCount() const { return m_fst_directory_count; }
+  u32 GetFstFileCount() const { return m_fst_file_count; }
+  u32 GetMaximumDirectoryDepth() const { return m_maximum_directory_depth; }
 
 private:
   friend NKitV1Result<class NKitV1SequentialReconstructionPlan>
@@ -139,7 +183,11 @@ private:
   std::vector<u8> m_reconstructed_header;
   std::vector<NKitV1SequentialSpan> m_decrypted_spans;
   std::vector<NKitV1FstOffsetPatch> m_fst_offset_patches;
+  std::vector<NKitV1FstEntry> m_fst_entries;
   std::vector<NKitV1PartitionGroupGeometry> m_groups;
+  u32 m_fst_directory_count = 0;
+  u32 m_fst_file_count = 0;
+  u32 m_maximum_directory_depth = 0;
   std::array<u8, 4> m_id{};
   u8 m_disc_number = 0;
 };
@@ -202,9 +250,9 @@ struct NKitV1SequentialReconstructionResult final
   u64 groups_reconstructed = 0;
 };
 
-// The O2 production subset supports one normal-hash data partition, any number of complete raw
-// 64-cluster groups followed by an optional 1..63-cluster final group, root-level regular FST
-// files, canonical leading-null gap context, no exceptional preserved hashes, and either a
+// The O3 production subset supports one normal-hash data partition, any number of complete raw
+// 64-cluster groups followed by an optional 1..63-cluster final group, validated nested-directory
+// FSTs, canonical leading-null gap context, no exceptional preserved hashes, and either a
 // self-contained disc prefix or the canonical removed-update placeholder.
 NKitV1Result<NKitV1SequentialReconstructionPlan>
 BuildWiiNKitV1SequentialReconstructionPlan(

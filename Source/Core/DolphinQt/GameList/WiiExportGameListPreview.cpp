@@ -130,6 +130,18 @@ Common::SHA1::Digest CalculateReconstructionRecipeFingerprint(
     HashValue(context.get(), patch.GetFieldOffset());
     HashValue(context.get(), patch.GetReconstructedFileOffset());
   }
+  for (const DiscIO::NKitV1FstEntry& entry : partition.GetFstEntries())
+  {
+    HashValue(context.get(), entry.GetIndex());
+    HashValue(context.get(), entry.GetType());
+    HashValue(context.get(), entry.GetParentIndex());
+    HashValue(context.get(), entry.GetSubtreeEndIndex());
+    HashValue(context.get(), entry.GetNameOffset());
+    HashValue(context.get(), entry.GetNameLength());
+    HashValue(context.get(), entry.GetDirectoryDepth());
+    HashValue(context.get(), entry.GetCompactedFileOffset());
+    HashValue(context.get(), entry.GetFileSize());
+  }
   return context->Finish();
 }
 

@@ -52,10 +52,39 @@ constexpr std::string_view NKIT_V1_SIGNATURE = "NKIT v01";
 
 struct FstFile
 {
+  u32 entry_index = 0;
   u64 field_offset = 0;
   u64 compacted_offset = 0;
   u64 size = 0;
   u64 aligned_size = 0;
+};
+
+struct ParsedFstEntry
+{
+  u32 index = 0;
+  NKitV1FstEntryType type = NKitV1FstEntryType::File;
+  u32 parent_index = 0;
+  u32 subtree_end_index = 0;
+  u32 name_offset = 0;
+  u32 name_length = 0;
+  u32 directory_depth = 0;
+  u64 compacted_file_offset = 0;
+  u64 file_size = 0;
+};
+
+struct ParsedFst
+{
+  std::vector<ParsedFstEntry> entries;
+  std::vector<FstFile> files;
+  u32 directory_count = 0;
+  u32 maximum_directory_depth = 0;
+};
+
+struct ActiveFstDirectory
+{
+  u32 index = 0;
+  u32 subtree_end_index = 0;
+  u32 depth = 0;
 };
 
 NKitV1Error Error(NKitV1ErrorCode code, u64 source_offset = 0,
@@ -98,6 +127,159 @@ bool HasBytes(std::span<const u8> bytes, size_t offset, std::string_view expecte
 {
   return offset <= bytes.size() && expected.size() <= bytes.size() - offset &&
          std::equal(expected.begin(), expected.end(), bytes.begin() + offset);
+}
+
+// Wii FST records are stored in preorder. A directory's second word is its parent directory index
+// and its third word is the exclusive index after its complete subtree. The reference NKit-v1
+// implementation recursively discovers regular files from this representation, then orders those
+// files by physical offset (and length) before consuming compact file bodies and gaps. This
+// iterative parser mirrors those semantics while validating the hierarchy without recursive stack
+// growth or allocating a tree of strings/objects.
+NKitV1Result<ParsedFst> ParseFst(std::span<const u8> payload, u64 fst_offset, u64 fst_size,
+                                u64 source_data_offset, u64 source_stored_size,
+                                u32 partition_index)
+{
+  u64 fst_end = 0;
+  if (!CheckedAdd(fst_offset, fst_size, &fst_end) || fst_end > payload.size())
+  {
+    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
+                                 source_data_offset + fst_offset, partition_index));
+  }
+
+  const u32 entry_count = ReadBigEndianU32(payload, static_cast<size_t>(fst_offset + 8));
+  u64 entry_bytes = 0;
+  if (ReadBigEndianU32(payload, static_cast<size_t>(fst_offset)) != 0x01000000 ||
+      entry_count == 0 || entry_count > MAX_FST_ENTRIES ||
+      !CheckedMultiply(entry_count, FST_ENTRY_SIZE, &entry_bytes) || entry_bytes > fst_size ||
+      ReadBigEndianU32(payload, static_cast<size_t>(fst_offset + 4)) != 0 ||
+      ReadBigEndianU32(payload, static_cast<size_t>(fst_offset + 8)) != entry_count)
+  {
+    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
+                                 source_data_offset + fst_offset, partition_index));
+  }
+
+  u64 name_table_offset = 0;
+  if (!CheckedAdd(fst_offset, entry_bytes, &name_table_offset) || name_table_offset >= fst_end)
+  {
+    return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
+                                 source_data_offset + fst_offset, partition_index));
+  }
+  const u64 name_table_size = fst_end - name_table_offset;
+
+  ParsedFst parsed;
+  parsed.entries.reserve(entry_count);
+  parsed.files.reserve(entry_count - 1);
+  ParsedFstEntry root;
+  root.index = 0;
+  root.type = NKitV1FstEntryType::Directory;
+  root.subtree_end_index = entry_count;
+  parsed.entries.emplace_back(root);
+  parsed.directory_count = 1;
+
+  std::vector<ActiveFstDirectory> directories;
+  directories.reserve(entry_count);
+  directories.push_back({0, entry_count, 0});
+
+  for (u32 entry = 1; entry < entry_count; ++entry)
+  {
+    while (directories.size() > 1 && entry >= directories.back().subtree_end_index)
+      directories.pop_back();
+    if (directories.empty() || entry >= directories.back().subtree_end_index)
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
+                                   source_data_offset + fst_offset + entry * FST_ENTRY_SIZE,
+                                   partition_index));
+    }
+
+    const ActiveFstDirectory parent = directories.back();
+    const u64 entry_offset = fst_offset + static_cast<u64>(entry) * FST_ENTRY_SIZE;
+    const u32 name_and_type =
+        ReadBigEndianU32(payload, static_cast<size_t>(entry_offset));
+    const u32 type = name_and_type >> 24;
+    const u32 name_offset = name_and_type & 0xffffff;
+    if ((type != 0 && type != 1) || name_offset >= name_table_size)
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
+                                   source_data_offset + entry_offset, partition_index));
+    }
+
+    u64 name_position = 0;
+    if (!CheckedAdd(name_table_offset, name_offset, &name_position) || name_position >= fst_end)
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
+                                   source_data_offset + entry_offset, partition_index));
+    }
+    const auto name_begin = payload.begin() + static_cast<size_t>(name_position);
+    const auto name_end = payload.begin() + static_cast<size_t>(fst_end);
+    const auto terminator = std::find(name_begin, name_end, 0);
+    const u64 name_length = static_cast<u64>(std::distance(name_begin, terminator));
+    if (terminator == name_end || name_length == 0 ||
+        name_length > std::numeric_limits<u32>::max())
+    {
+      return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
+                                   source_data_offset + entry_offset, partition_index));
+    }
+
+    ParsedFstEntry parsed_entry;
+    parsed_entry.index = entry;
+    parsed_entry.type = type == 1 ? NKitV1FstEntryType::Directory : NKitV1FstEntryType::File;
+    parsed_entry.parent_index = parent.index;
+    parsed_entry.name_offset = name_offset;
+    parsed_entry.name_length = static_cast<u32>(name_length);
+    parsed_entry.directory_depth = parent.depth;
+
+    if (type == 1)
+    {
+      const u32 recorded_parent =
+          ReadBigEndianU32(payload, static_cast<size_t>(entry_offset + 4));
+      const u32 subtree_end =
+          ReadBigEndianU32(payload, static_cast<size_t>(entry_offset + 8));
+      if (recorded_parent != parent.index || subtree_end <= entry ||
+          subtree_end > parent.subtree_end_index || subtree_end > entry_count)
+      {
+        return std::unexpected(Error(NKitV1ErrorCode::InvalidSequentialLayout,
+                                     source_data_offset + entry_offset, partition_index));
+      }
+      parsed_entry.parent_index = recorded_parent;
+      parsed_entry.subtree_end_index = subtree_end;
+      parsed_entry.directory_depth = parent.depth + 1;
+      parsed.maximum_directory_depth =
+          std::max(parsed.maximum_directory_depth, parsed_entry.directory_depth);
+      ++parsed.directory_count;
+      directories.push_back({entry, subtree_end, parsed_entry.directory_depth});
+    }
+    else
+    {
+      u64 compacted_offset = 0;
+      if (!CheckedMultiply(
+              ReadBigEndianU32(payload, static_cast<size_t>(entry_offset + 4)), 4,
+              &compacted_offset))
+      {
+        return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
+                                     source_data_offset + entry_offset + 4, partition_index));
+      }
+      const u64 file_size =
+          ReadBigEndianU32(payload, static_cast<size_t>(entry_offset + 8));
+      if (compacted_offset > source_stored_size)
+      {
+        return std::unexpected(Error(NKitV1ErrorCode::InvalidRange,
+                                     source_data_offset + entry_offset + 4, partition_index));
+      }
+      parsed_entry.compacted_file_offset = compacted_offset;
+      parsed_entry.file_size = file_size;
+
+      FstFile file;
+      file.entry_index = entry;
+      file.field_offset = entry_offset + 4;
+      file.compacted_offset = compacted_offset;
+      file.size = file_size;
+      file.aligned_size = Common::AlignUp(file_size, 4ull);
+      parsed.files.emplace_back(file);
+    }
+    parsed.entries.emplace_back(parsed_entry);
+  }
+
+  return parsed;
 }
 
 NKitV1Result<std::vector<u8>> ReadBounded(BlobReader& source, u64 offset, u64 size, u64 limit,
@@ -619,68 +801,20 @@ BuildWiiNKitV1SequentialReconstructionPlan(
   if (!payload)
     return std::unexpected(payload.error());
 
-  const size_t fst = static_cast<size_t>(fst_offset);
-  const u32 entry_count = ReadBigEndianU32(*payload, fst + 8);
-  u64 entry_bytes = 0;
-  if (ReadBigEndianU32(*payload, fst) != 0x01000000 || entry_count < 2 ||
-      entry_count > MAX_FST_ENTRIES ||
-      !CheckedMultiply(entry_count, FST_ENTRY_SIZE, &entry_bytes) || entry_bytes > fst_size)
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
-                                 source_partition.GetSourceDataOffset() + fst_offset,
-                                 partition_index));
-  }
-  const u64 name_table_offset = fst_offset + entry_bytes;
-  if (name_table_offset >= fst_end)
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
-                                 source_partition.GetSourceDataOffset() + fst_offset,
-                                 partition_index));
-  }
+  auto parsed_fst = ParseFst(*payload, fst_offset, fst_size,
+                             source_partition.GetSourceDataOffset(),
+                             source_partition.GetSourceStoredSize(), partition_index);
+  if (!parsed_fst)
+    return std::unexpected(parsed_fst.error());
 
-  std::vector<FstFile> files;
-  files.reserve(entry_count - 1);
-  for (u32 entry = 1; entry < entry_count; ++entry)
-  {
-    const u64 entry_offset = fst_offset + static_cast<u64>(entry) * FST_ENTRY_SIZE;
-    if ((*payload)[static_cast<size_t>(entry_offset)] != 0)
-    {
-      return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
-                                   source_partition.GetSourceDataOffset() + entry_offset,
-                                   partition_index));
-    }
-    const u32 name_offset =
-        ReadBigEndianU32(*payload, static_cast<size_t>(entry_offset)) & 0xffffff;
-    u64 name_position = 0;
-    if (!CheckedAdd(name_table_offset, name_offset, &name_position) ||
-        name_position >= fst_end || (*payload)[static_cast<size_t>(name_position)] == 0 ||
-        std::find(payload->begin() + name_position, payload->begin() + fst_end, 0) ==
-            payload->begin() + fst_end)
-    {
-      return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
-                                   source_partition.GetSourceDataOffset() + entry_offset,
-                                   partition_index));
-    }
-    FstFile file;
-    file.field_offset = entry_offset + 4;
-    if (!CheckedMultiply(ReadBigEndianU32(*payload, static_cast<size_t>(file.field_offset)), 4,
-                         &file.compacted_offset))
-    {
-      return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
-                                   source_partition.GetSourceDataOffset() + file.field_offset,
-                                   partition_index));
-    }
-    file.size = ReadBigEndianU32(*payload, static_cast<size_t>(entry_offset + 8));
-    if (file.size == 0)
-    {
-      return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
-                                   source_partition.GetSourceDataOffset() + entry_offset,
-                                   partition_index));
-    }
-    file.aligned_size = Common::AlignUp(file.size, 4ull);
-    files.emplace_back(file);
-  }
+  std::vector<FstFile>& files = parsed_fst->files;
   if (files.empty())
+  {
+    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
+                                 source_partition.GetSourceDataOffset() + fst_offset,
+                                 partition_index));
+  }
+  if (std::ranges::any_of(files, [](const FstFile& file) { return file.size == 0; }))
   {
     return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
                                  source_partition.GetSourceDataOffset() + fst_offset,
@@ -689,7 +823,9 @@ BuildWiiNKitV1SequentialReconstructionPlan(
   std::ranges::sort(files, [](const FstFile& lhs, const FstFile& rhs) {
     if (lhs.compacted_offset != rhs.compacted_offset)
       return lhs.compacted_offset < rhs.compacted_offset;
-    return lhs.size < rhs.size;
+    if (lhs.size != rhs.size)
+      return lhs.size < rhs.size;
+    return lhs.entry_index < rhs.entry_index;
   });
 
   const u64 hash_flag_size = Common::AlignUp(group_count, 32ull) / 8;
@@ -721,6 +857,24 @@ BuildWiiNKitV1SequentialReconstructionPlan(
   partition.m_decrypted_data_size = source_partition.GetOriginalDecryptedSize();
   std::copy_n(payload->begin(), partition.m_id.size(), partition.m_id.begin());
   partition.m_disc_number = (*payload)[6];
+  partition.m_fst_entries.reserve(parsed_fst->entries.size());
+  for (const ParsedFstEntry& parsed_entry : parsed_fst->entries)
+  {
+    NKitV1FstEntry entry;
+    entry.m_index = parsed_entry.index;
+    entry.m_type = parsed_entry.type;
+    entry.m_parent_index = parsed_entry.parent_index;
+    entry.m_subtree_end_index = parsed_entry.subtree_end_index;
+    entry.m_name_offset = parsed_entry.name_offset;
+    entry.m_name_length = parsed_entry.name_length;
+    entry.m_directory_depth = parsed_entry.directory_depth;
+    entry.m_compacted_file_offset = parsed_entry.compacted_file_offset;
+    entry.m_file_size = parsed_entry.file_size;
+    partition.m_fst_entries.emplace_back(entry);
+  }
+  partition.m_fst_directory_count = parsed_fst->directory_count;
+  partition.m_fst_file_count = static_cast<u32>(files.size());
+  partition.m_maximum_directory_depth = parsed_fst->maximum_directory_depth;
 
   partition.m_groups.reserve(static_cast<size_t>(group_count));
   for (u64 group = 0; group < group_count; ++group)
@@ -778,39 +932,44 @@ BuildWiiNKitV1SequentialReconstructionPlan(
     gap_options.encoded_source_offset = source_partition.GetSourceDataOffset() + source_cursor;
     gap_options.maximum_reconstructed_size = source_partition.GetOriginalDecryptedSize();
     const u64 gap_source_size = file.compacted_offset - source_cursor;
-    auto encoded_gap = ReadBounded(source, gap_options.encoded_source_offset, gap_source_size,
-                                   MAX_GAP_ENCODING_SIZE, partition_index);
-    if (!encoded_gap)
-      return std::unexpected(encoded_gap.error());
-    auto gap = DecodeNKitV1Gap(*encoded_gap, gap_options);
-    if (!gap)
-      return std::unexpected(gap.error());
-    u64 encoded_end = 0;
-    if (gap->ContainsJunkFile() ||
-        !CheckedAdd(source_cursor, gap->GetEncodedBytesConsumed(), &encoded_end) ||
-        encoded_end > file.compacted_offset)
+    // Canonical NKit emits no gap record when two aligned regular files are physically adjacent.
+    // The reference reader treats that as a zero-length reconstructed gap.
+    if (gap_source_size != 0)
     {
-      return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
-                                   source_partition.GetSourceDataOffset() + source_cursor,
-                                   partition_index));
-    }
-    auto padding = ValidateZeroRange(
-        source, source_partition.GetSourceDataOffset() + encoded_end,
-        file.compacted_offset - encoded_end, partition_index, cancellation_callback);
-    if (!padding)
-      return std::unexpected(padding.error());
-    std::vector<NKitV1SequentialSpan> gap_spans =
-        convert_gap_spans(gap->GetSpans(), true, file_index == 0);
-    partition.m_decrypted_spans.insert(partition.m_decrypted_spans.end(),
-                                       std::make_move_iterator(gap_spans.begin()),
-                                       std::make_move_iterator(gap_spans.end()));
-    if (!CheckedAdd(reconstructed_cursor, gap->GetReconstructedBytes(),
-                    &reconstructed_cursor) ||
-        reconstructed_cursor % 4 != 0)
-    {
-      return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
-                                   source_partition.GetSourceDataOffset() + source_cursor,
-                                   partition_index));
+      auto encoded_gap = ReadBounded(source, gap_options.encoded_source_offset, gap_source_size,
+                                     MAX_GAP_ENCODING_SIZE, partition_index);
+      if (!encoded_gap)
+        return std::unexpected(encoded_gap.error());
+      auto gap = DecodeNKitV1Gap(*encoded_gap, gap_options);
+      if (!gap)
+        return std::unexpected(gap.error());
+      u64 encoded_end = 0;
+      if (gap->ContainsJunkFile() ||
+          !CheckedAdd(source_cursor, gap->GetEncodedBytesConsumed(), &encoded_end) ||
+          encoded_end > file.compacted_offset)
+      {
+        return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
+                                     source_partition.GetSourceDataOffset() + source_cursor,
+                                     partition_index));
+      }
+      auto padding = ValidateZeroRange(
+          source, source_partition.GetSourceDataOffset() + encoded_end,
+          file.compacted_offset - encoded_end, partition_index, cancellation_callback);
+      if (!padding)
+        return std::unexpected(padding.error());
+      std::vector<NKitV1SequentialSpan> gap_spans =
+          convert_gap_spans(gap->GetSpans(), true, file_index == 0);
+      partition.m_decrypted_spans.insert(partition.m_decrypted_spans.end(),
+                                         std::make_move_iterator(gap_spans.begin()),
+                                         std::make_move_iterator(gap_spans.end()));
+      if (!CheckedAdd(reconstructed_cursor, gap->GetReconstructedBytes(),
+                      &reconstructed_cursor) ||
+          reconstructed_cursor % 4 != 0)
+      {
+        return std::unexpected(Error(NKitV1ErrorCode::ArithmeticOverflow,
+                                     source_partition.GetSourceDataOffset() + source_cursor,
+                                     partition_index));
+      }
     }
 
     NKitV1FstOffsetPatch patch;

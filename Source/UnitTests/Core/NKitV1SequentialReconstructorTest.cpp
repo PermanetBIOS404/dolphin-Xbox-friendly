@@ -92,6 +92,13 @@ void WriteBigEndianU32(std::span<u8> bytes, size_t offset, u32 value)
   bytes[offset + 3] = static_cast<u8>(value);
 }
 
+u32 ReadBigEndianU32(std::span<const u8> bytes, size_t offset)
+{
+  EXPECT_LE(offset + sizeof(u32), bytes.size());
+  return static_cast<u32>(bytes[offset]) << 24 | static_cast<u32>(bytes[offset + 1]) << 16 |
+         static_cast<u32>(bytes[offset + 2]) << 8 | static_cast<u32>(bytes[offset + 3]);
+}
+
 void WriteBigEndianU64(std::span<u8> bytes, size_t offset, u64 value)
 {
   WriteBigEndianU32(bytes, offset, static_cast<u32>(value >> 32));
@@ -631,6 +638,219 @@ std::vector<u8> EncodeN4AllJunkGap(u64 gap_length)
   return encoded;
 }
 
+constexpr std::array<u8, 6> O3_SYNTHETIC_ID = {'R', 'O', '3', 'P', '0', '1'};
+constexpr std::array<u8, 4> O3_PARTITION_ID = {'R', 'O', '3', 'P'};
+constexpr std::array<u8, 17> O3_ROOT_FILE = {
+    'O', '3', ' ', 'r', 'o', 'o', 't', ' ', 'f', 'i', 'l', 'e', '\r', '\n', 0, 1, 2};
+constexpr std::array<u8, 23> O3_ALPHA_FILE = {
+    'O', '3', ' ', 'a', 'l', 'p', 'h', 'a', ' ', 'n', 'e', 's', 't', 'e', 'd', ' ',
+    'f', 'i', 'l', 'e', '\r', '\n', 0};
+constexpr std::array<u8, 29> O3_BETA_FILE = {
+    'O', '3', ' ', 'b', 'e', 't', 'a', ' ', 'd', 'e', 'e', 'p', 'e', 's', 't', ' ',
+    'n', 'e', 's', 't', 'e', 'd', ' ', 'f', 'i', 'l', 'e', '\r', '\n'};
+constexpr std::array<u8, 19> O3_GAMMA_FILE = {
+    'O', '3', ' ', 'g', 'a', 'm', 'm', 'a', ' ', 's', 'i', 'b', 'l', 'i', 'n', 'g', '\r',
+    '\n', 0};
+constexpr u64 O3_FST_SIZE = 0xc0;
+constexpr u64 O3_GAMMA_OFFSET = 0x10000;
+constexpr u64 O3_ROOT_OFFSET = 0x18000;
+constexpr u64 O3_BETA_OFFSET = VolumeWii::GROUP_DATA_SIZE + 0x2000;
+constexpr u64 O3_ALPHA_OFFSET =
+    O3_BETA_OFFSET + Common::AlignUp(O3_BETA_FILE.size(), size_t{4});
+
+void SetO3DirectoryEntry(std::span<u8> decrypted, size_t entry, u32 name_offset,
+                         u32 parent_index, u32 subtree_end_index)
+{
+  const size_t offset = FST_OFFSET + entry * 12;
+  WriteBigEndianU32(decrypted, offset, 0x01000000 | name_offset);
+  WriteBigEndianU32(decrypted, offset + 4, parent_index);
+  WriteBigEndianU32(decrypted, offset + 8, subtree_end_index);
+}
+
+void BuildO3MixedGapOracle(std::span<u8> decrypted, u64 gap_start, u64 gap_length,
+                           bool leading_nulls)
+{
+  ASSERT_GE(gap_length, 0x300u);
+  GenerateJunk(O3_PARTITION_ID, 0, N4_DECRYPTED_SIZE, gap_start,
+               decrypted.subspan(static_cast<size_t>(gap_start), 0x100));
+  if (leading_nulls)
+    std::fill_n(decrypted.begin() + gap_start, 0x1c, 0);
+  std::fill_n(decrypted.begin() + gap_start + 0x100, 0x100, 0x5a);
+  for (u64 i = 0; i < 0x100; ++i)
+    decrypted[gap_start + 0x200 + i] = static_cast<u8>(0x39 ^ i);
+  std::fill(decrypted.begin() + gap_start + 0x300,
+            decrypted.begin() + gap_start + gap_length, 0);
+}
+
+// Independent conventional oracle for a preorder FST whose traversal order
+// (root, alpha, beta, gamma) intentionally differs from physical file order
+// (gamma, root, beta, alpha).
+SyntheticN4ConventionalDisc BuildSyntheticO3NestedConventionalDisc()
+{
+  SyntheticN4ConventionalDisc disc;
+  disc.stored_bytes =
+      std::make_shared<std::vector<u8>>(static_cast<size_t>(N4_PARTITION_END));
+  disc.decrypted_blocks.resize(N4_GROUP_COUNT * VolumeWii::BLOCKS_PER_GROUP);
+  std::vector<u8>& bytes = *disc.stored_bytes;
+  std::span<u8> decrypted(reinterpret_cast<u8*>(disc.decrypted_blocks.data()),
+                          static_cast<size_t>(N4_DECRYPTED_SIZE));
+
+  std::copy(O3_SYNTHETIC_ID.begin(), O3_SYNTHETIC_ID.end(), bytes.begin());
+  bytes[7] = 1;
+  WriteBigEndianU32(bytes, 0x18, WII_DISC_MAGIC);
+  WriteBigEndianU32(bytes, 0x40000, 1);
+  WriteBigEndianU32(bytes, 0x40004, 0x40020 / 4);
+  WriteBigEndianU32(bytes, 0x40020, static_cast<u32>(ORIGINAL_PARTITION_OFFSET / 4));
+  WriteBigEndianU32(bytes, 0x40024, PARTITION_DATA);
+  GenerateJunk(O3_PARTITION_ID, 0, SL_DVD_SIZE, WII_NKIT_V1_HEADER_SIZE,
+               std::span<u8>(bytes).subspan(WII_NKIT_V1_HEADER_SIZE, 0x100));
+  std::fill_n(bytes.begin() + WII_NKIT_V1_HEADER_SIZE + 0x100, 0x100, 0x5a);
+  for (u64 i = 0; i < 0x100; ++i)
+    bytes[WII_NKIT_V1_HEADER_SIZE + 0x200 + i] = static_cast<u8>(0xc3 ^ i);
+
+  std::copy(O3_SYNTHETIC_ID.begin(), O3_SYNTHETIC_ID.end(), decrypted.begin());
+  decrypted[7] = 1;
+  WriteBigEndianU32(decrypted, 0x18, WII_DISC_MAGIC);
+  WriteBigEndianU32(decrypted, 0x420, static_cast<u32>(DOL_OFFSET / 4));
+  WriteBigEndianU32(decrypted, 0x424, static_cast<u32>(FST_OFFSET / 4));
+  WriteBigEndianU32(decrypted, 0x428, static_cast<u32>(O3_FST_SIZE / 4));
+  WriteBigEndianU32(decrypted, DOL_OFFSET, 0x100);
+  WriteBigEndianU32(decrypted, DOL_OFFSET + 0x90, 0x20);
+
+  SetO3DirectoryEntry(decrypted, 0, 0, 0, 9);
+  SetN4FileEntry(decrypted, 1, 0, O3_ROOT_OFFSET, O3_ROOT_FILE.size());
+  SetO3DirectoryEntry(decrypted, 2, 9, 0, 6);
+  SetN4FileEntry(decrypted, 3, 15, O3_ALPHA_OFFSET, O3_ALPHA_FILE.size());
+  SetO3DirectoryEntry(decrypted, 4, 25, 2, 6);
+  SetN4FileEntry(decrypted, 5, 31, O3_BETA_OFFSET, O3_BETA_FILE.size());
+  SetO3DirectoryEntry(decrypted, 6, 40, 0, 8);
+  SetN4FileEntry(decrypted, 7, 46, O3_GAMMA_OFFSET, O3_GAMMA_FILE.size());
+  SetO3DirectoryEntry(decrypted, 8, 56, 0, 9);
+  constexpr std::string_view names{
+      "root.bin\0dir_a\0alpha.bin\0dir_b\0beta.bin\0dir_c\0gamma.bin\0empty_dir\0", 66};
+  std::copy(names.begin(), names.end(), decrypted.begin() + FST_OFFSET + 9 * 12);
+
+  u64 cursor = FST_OFFSET + O3_FST_SIZE;
+  BuildO3MixedGapOracle(decrypted, cursor, O3_GAMMA_OFFSET - cursor, true);
+  std::copy(O3_GAMMA_FILE.begin(), O3_GAMMA_FILE.end(),
+            decrypted.begin() + O3_GAMMA_OFFSET);
+  cursor = O3_GAMMA_OFFSET + Common::AlignUp(O3_GAMMA_FILE.size(), size_t{4});
+  BuildO3MixedGapOracle(decrypted, cursor, O3_ROOT_OFFSET - cursor, true);
+  std::copy(O3_ROOT_FILE.begin(), O3_ROOT_FILE.end(), decrypted.begin() + O3_ROOT_OFFSET);
+  cursor = O3_ROOT_OFFSET + Common::AlignUp(O3_ROOT_FILE.size(), size_t{4});
+  BuildO3MixedGapOracle(decrypted, cursor, O3_BETA_OFFSET - cursor, false);
+  std::copy(O3_BETA_FILE.begin(), O3_BETA_FILE.end(), decrypted.begin() + O3_BETA_OFFSET);
+  cursor = O3_BETA_OFFSET + Common::AlignUp(O3_BETA_FILE.size(), size_t{4});
+  EXPECT_EQ(cursor, O3_ALPHA_OFFSET);
+  std::copy(O3_ALPHA_FILE.begin(), O3_ALPHA_FILE.end(), decrypted.begin() + O3_ALPHA_OFFSET);
+
+  std::vector<u8> h3_table(WII_PARTITION_H3_SIZE);
+  for (u64 group = 0; group < N4_GROUP_COUNT; ++group)
+  {
+    std::array<VolumeWii::HashBlock, VolumeWii::BLOCKS_PER_GROUP> hashes{};
+    const auto* group_data =
+        disc.decrypted_blocks.data() + group * VolumeWii::BLOCKS_PER_GROUP;
+    EXPECT_TRUE(VolumeWii::HashGroup(group_data, hashes.data(), {}, true));
+    const Common::SHA1::Digest h3 = Common::SHA1::CalculateDigest(hashes[0].h2);
+    std::copy(h3.begin(), h3.end(), h3_table.begin() + group * h3.size());
+  }
+
+  const std::vector<u8> ticket = BuildSyntheticTicket();
+  std::vector<u8> tmd = BuildSyntheticTmd(Common::SHA1::CalculateDigest(h3_table));
+  const size_t content = sizeof(IOS::ES::TMDHeader);
+  WriteBigEndianU64(tmd, content + offsetof(IOS::ES::Content, size), N4_RAW_PARTITION_SIZE);
+  const u64 partition = ORIGINAL_PARTITION_OFFSET;
+  std::copy(ticket.begin(), ticket.end(), bytes.begin() + partition);
+  WriteBigEndianU32(bytes, partition + WII_PARTITION_TMD_SIZE_ADDRESS,
+                    static_cast<u32>(tmd.size()));
+  WriteBigEndianU32(bytes, partition + WII_PARTITION_TMD_OFFSET_ADDRESS,
+                    static_cast<u32>(TMD_OFFSET / 4));
+  WriteBigEndianU32(bytes, partition + WII_PARTITION_CERT_CHAIN_SIZE_ADDRESS, 0);
+  WriteBigEndianU32(bytes, partition + WII_PARTITION_CERT_CHAIN_OFFSET_ADDRESS, 0);
+  WriteBigEndianU32(bytes, partition + WII_PARTITION_H3_OFFSET_ADDRESS,
+                    static_cast<u32>(H3_OFFSET / 4));
+  WriteBigEndianU32(bytes, partition + 0x2b8, static_cast<u32>(PARTITION_DATA_OFFSET / 4));
+  WriteBigEndianU32(bytes, partition + 0x2bc,
+                    static_cast<u32>(N4_RAW_PARTITION_SIZE / 4));
+  std::copy(tmd.begin(), tmd.end(), bytes.begin() + partition + TMD_OFFSET);
+  std::copy(h3_table.begin(), h3_table.end(), bytes.begin() + partition + H3_OFFSET);
+
+  for (u64 group = 0; group < N4_GROUP_COUNT; ++group)
+  {
+    std::array<u8, VolumeWii::GROUP_TOTAL_SIZE> encrypted{};
+    const auto* group_data =
+        disc.decrypted_blocks.data() + group * VolumeWii::BLOCKS_PER_GROUP;
+    EXPECT_TRUE(VolumeWii::EncryptGroup(group_data, SYNTHETIC_TITLE_KEY, &encrypted, {}, true));
+    std::copy(encrypted.begin(), encrypted.end(),
+              bytes.begin() + partition + PARTITION_DATA_OFFSET +
+                  group * VolumeWii::GROUP_TOTAL_SIZE);
+  }
+  return disc;
+}
+
+void RefreshSyntheticN4PartitionCrypto(SyntheticN4ConventionalDisc* disc)
+{
+  std::vector<u8>& bytes = *disc->stored_bytes;
+  std::vector<u8> h3_table(WII_PARTITION_H3_SIZE);
+  for (u64 group = 0; group < N4_GROUP_COUNT; ++group)
+  {
+    std::array<VolumeWii::HashBlock, VolumeWii::BLOCKS_PER_GROUP> hashes{};
+    const auto* group_data =
+        disc->decrypted_blocks.data() + group * VolumeWii::BLOCKS_PER_GROUP;
+    ASSERT_TRUE(VolumeWii::HashGroup(group_data, hashes.data(), {}, true));
+    const Common::SHA1::Digest h3 = Common::SHA1::CalculateDigest(hashes[0].h2);
+    std::copy(h3.begin(), h3.end(), h3_table.begin() + group * h3.size());
+  }
+
+  std::vector<u8> tmd = BuildSyntheticTmd(Common::SHA1::CalculateDigest(h3_table));
+  const size_t content = sizeof(IOS::ES::TMDHeader);
+  WriteBigEndianU64(tmd, content + offsetof(IOS::ES::Content, size), N4_RAW_PARTITION_SIZE);
+  const u64 partition = ORIGINAL_PARTITION_OFFSET;
+  std::copy(tmd.begin(), tmd.end(), bytes.begin() + partition + TMD_OFFSET);
+  std::copy(h3_table.begin(), h3_table.end(), bytes.begin() + partition + H3_OFFSET);
+  for (u64 group = 0; group < N4_GROUP_COUNT; ++group)
+  {
+    std::array<u8, VolumeWii::GROUP_TOTAL_SIZE> encrypted{};
+    const auto* group_data =
+        disc->decrypted_blocks.data() + group * VolumeWii::BLOCKS_PER_GROUP;
+    ASSERT_TRUE(VolumeWii::EncryptGroup(group_data, SYNTHETIC_TITLE_KEY, &encrypted, {}, true));
+    std::copy(encrypted.begin(), encrypted.end(),
+              bytes.begin() + partition + PARTITION_DATA_OFFSET +
+                  group * VolumeWii::GROUP_TOTAL_SIZE);
+  }
+}
+
+constexpr u32 O3_LARGE_FST_ENTRY_COUNT = 3000;
+
+SyntheticN4ConventionalDisc BuildSyntheticO3LargeFstConventionalDisc()
+{
+  SyntheticN4ConventionalDisc disc = BuildSyntheticO3NestedConventionalDisc();
+  std::span<u8> decrypted(reinterpret_cast<u8*>(disc.decrypted_blocks.data()),
+                          static_cast<size_t>(N4_DECRYPTED_SIZE));
+  constexpr u64 entry_bytes = static_cast<u64>(O3_LARGE_FST_ENTRY_COUNT) * 12;
+  constexpr u64 fst_size = Common::AlignUp(entry_bytes + 66, 4ull);
+  static_assert(FST_OFFSET + fst_size < O3_GAMMA_OFFSET);
+  std::fill(decrypted.begin() + FST_OFFSET, decrypted.begin() + O3_GAMMA_OFFSET, 0);
+  WriteBigEndianU32(decrypted, 0x428, static_cast<u32>(fst_size / 4));
+  SetO3DirectoryEntry(decrypted, 0, 0, 0, O3_LARGE_FST_ENTRY_COUNT);
+  SetN4FileEntry(decrypted, 1, 0, O3_ROOT_OFFSET, O3_ROOT_FILE.size());
+  SetO3DirectoryEntry(decrypted, 2, 9, 0, 6);
+  SetN4FileEntry(decrypted, 3, 15, O3_ALPHA_OFFSET, O3_ALPHA_FILE.size());
+  SetO3DirectoryEntry(decrypted, 4, 25, 2, 6);
+  SetN4FileEntry(decrypted, 5, 31, O3_BETA_OFFSET, O3_BETA_FILE.size());
+  SetO3DirectoryEntry(decrypted, 6, 40, 0, 8);
+  SetN4FileEntry(decrypted, 7, 46, O3_GAMMA_OFFSET, O3_GAMMA_FILE.size());
+  for (u32 entry = 8; entry < O3_LARGE_FST_ENTRY_COUNT; ++entry)
+    SetO3DirectoryEntry(decrypted, entry, 56, 0, entry + 1);
+  constexpr std::string_view names{
+      "root.bin\0dir_a\0alpha.bin\0dir_b\0beta.bin\0dir_c\0gamma.bin\0empty_dir\0", 66};
+  std::copy(names.begin(), names.end(), decrypted.begin() + FST_OFFSET + entry_bytes);
+  const u64 fst_end = FST_OFFSET + fst_size;
+  BuildO3MixedGapOracle(decrypted, fst_end, O3_GAMMA_OFFSET - fst_end, true);
+  RefreshSyntheticN4PartitionCrypto(&disc);
+  return disc;
+}
+
 struct SyntheticN4NKitFixture
 {
   std::shared_ptr<std::vector<u8>> bytes;
@@ -731,6 +951,89 @@ SyntheticN4NKitFixture BuildSyntheticN4NKitFixture(
       EncodeFillGap(conventional.decrypted_size - after_c);
   payload.insert(payload.end(), partition_tail.begin(), partition_tail.end());
   const std::vector<u8> disc_tail = EncodeFillGap(SL_DVD_SIZE - conventional.partition_end);
+  payload.insert(payload.end(), disc_tail.begin(), disc_tail.end());
+  payload.resize(Common::AlignUp(payload.size(), static_cast<size_t>(0x8000)), 0);
+
+  WriteBigEndianU32(source, SOURCE_PARTITION_OFFSET + 0x2bc,
+                    static_cast<u32>(payload.size() / 4));
+  source.resize(SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE + payload.size());
+  std::copy(payload.begin(), payload.end(),
+            source.begin() + SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE);
+  return fixture;
+}
+
+// Test-only encoder for the nested fixture. It follows the canonical NKit-v1 physical-file rule:
+// directories are retained in the FST but consume no stream bytes, while regular files are
+// compacted in original physical-offset order and their FST offset words are independently
+// rewritten to those compact positions.
+SyntheticN4NKitFixture BuildSyntheticO3NestedNKitFixture(
+    const SyntheticN4ConventionalDisc& conventional)
+{
+  SyntheticN4NKitFixture fixture;
+  fixture.bytes =
+      std::make_shared<std::vector<u8>>(SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE);
+  std::vector<u8>& source = *fixture.bytes;
+  EXPECT_TRUE(conventional.MakeReader()->Read(0, WII_NKIT_V1_HEADER_SIZE, source.data()));
+  source[0x60] = 1;
+  source[0x61] = 1;
+  std::copy_n("NKIT v01", 8, source.begin() + 0x200);
+  WriteBigEndianU32(source, 0x208, 0x4f334653);
+  WriteBigEndianU32(source, 0x20c, 0x31415926);
+  WriteBigEndianU32(source, 0x210, static_cast<u32>(SL_DVD_SIZE / 4));
+  std::copy(O3_PARTITION_ID.begin(), O3_PARTITION_ID.end(), source.begin() + 0x214);
+  WriteBigEndianU32(source, 0x218, 0);
+  WriteBigEndianU32(source, 0x40020, static_cast<u32>(SOURCE_PARTITION_OFFSET / 4));
+
+  const std::vector<u8> prefix_gap = EncodeExplicitMixedGap(
+      ORIGINAL_PARTITION_OFFSET - WII_NKIT_V1_HEADER_SIZE,
+      std::span<const u8>(*conventional.stored_bytes)
+          .subspan(WII_NKIT_V1_HEADER_SIZE + 0x200, 0x100));
+  std::copy(prefix_gap.begin(), prefix_gap.end(), source.begin() + WII_NKIT_V1_HEADER_SIZE);
+  EXPECT_TRUE(conventional.MakeReader()->Read(
+      ORIGINAL_PARTITION_OFFSET, PARTITION_HEADER_SIZE,
+      source.data() + SOURCE_PARTITION_OFFSET));
+
+  std::span<const u8> decrypted(
+      reinterpret_cast<const u8*>(conventional.decrypted_blocks.data()),
+      static_cast<size_t>(N4_DECRYPTED_SIZE));
+  const u64 fst_end =
+      FST_OFFSET + static_cast<u64>(ReadBigEndianU32(decrypted, 0x428)) * 4;
+  std::vector<u8> payload(decrypted.begin(), decrypted.begin() + fst_end);
+  std::copy_n("NKIT v01", 8, payload.begin() + 0x200);
+  WriteBigEndianU32(payload, 0x210, static_cast<u32>(N4_RAW_PARTITION_SIZE / 4));
+  fixture.fst_offset = FST_OFFSET;
+  fixture.flags_offset = payload.size();
+  payload.resize(payload.size() + 4, 0);
+
+  u64 reconstructed_cursor = fst_end;
+  const auto append_file = [&](u32 entry, u64 original_offset, std::span<const u8> contents) {
+    ASSERT_GE(original_offset, reconstructed_cursor);
+    if (original_offset != reconstructed_cursor)
+    {
+      const std::vector<u8> gap = EncodeExplicitMixedGap(
+          original_offset - reconstructed_cursor,
+          decrypted.subspan(static_cast<size_t>(reconstructed_cursor + 0x200), 0x100));
+      payload.insert(payload.end(), gap.begin(), gap.end());
+    }
+    WriteBigEndianU32(payload, FST_OFFSET + static_cast<u64>(entry) * 12 + 4,
+                      static_cast<u32>(payload.size() / 4));
+    payload.insert(payload.end(), decrypted.begin() + original_offset,
+                   decrypted.begin() + original_offset +
+                       Common::AlignUp(contents.size(), size_t{4}));
+    reconstructed_cursor =
+        original_offset + Common::AlignUp(contents.size(), size_t{4});
+  };
+
+  append_file(7, O3_GAMMA_OFFSET, O3_GAMMA_FILE);
+  append_file(1, O3_ROOT_OFFSET, O3_ROOT_FILE);
+  append_file(5, O3_BETA_OFFSET, O3_BETA_FILE);
+  append_file(3, O3_ALPHA_OFFSET, O3_ALPHA_FILE);
+
+  fixture.partition_tail_source_offset = payload.size();
+  const std::vector<u8> partition_tail =
+      EncodeFillGap(N4_DECRYPTED_SIZE - reconstructed_cursor);
+  payload.insert(payload.end(), partition_tail.begin(), partition_tail.end());
+  const std::vector<u8> disc_tail = EncodeFillGap(SL_DVD_SIZE - N4_PARTITION_END);
   payload.insert(payload.end(), disc_tail.begin(), disc_tail.end());
   payload.resize(Common::AlignUp(payload.size(), static_cast<size_t>(0x8000)), 0);
 
@@ -1254,7 +1557,7 @@ TEST_F(NKitV1SequentialProofTest, RejectsMalformedGeometryFlagsRangesTruncationA
     ASSERT_TRUE(foundation.has_value());
     auto plan = BuildWiiNKitV1SequentialReconstructionPlan(*source, *foundation);
     ASSERT_FALSE(plan.has_value());
-    EXPECT_EQ(plan.error().code, NKitV1ErrorCode::InvalidSequentialLayout);
+    EXPECT_EQ(plan.error().code, NKitV1ErrorCode::InvalidRange);
   }
   {
     SyntheticNKitV1Fixture truncated = s_nkit;
@@ -1530,14 +1833,15 @@ TEST_F(NKitV1RandomAccessTest, CanonicalGapContextsAndConservativeRejectionsAreE
   ASSERT_FALSE(unsupported_result.has_value());
   EXPECT_EQ(unsupported_result.error().code, NKitV1ErrorCode::UnsupportedGapContext);
 
-  SyntheticN4NKitFixture nested_directory = s_nkit;
-  nested_directory.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
-  (*nested_directory.bytes)[SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE + FST_OFFSET + 12] =
+  SyntheticN4NKitFixture malformed_directory = s_nkit;
+  malformed_directory.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
+  (*malformed_directory.bytes)[SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE + FST_OFFSET + 12] =
       1;
-  auto nested_directory_result =
-      TryCreateWiiNKitV1ReconstructedReader(nested_directory.MakeReader());
-  ASSERT_FALSE(nested_directory_result.has_value());
-  EXPECT_EQ(nested_directory_result.error().code, NKitV1ErrorCode::UnsupportedGapContext);
+  auto malformed_directory_result =
+      TryCreateWiiNKitV1ReconstructedReader(malformed_directory.MakeReader());
+  ASSERT_FALSE(malformed_directory_result.has_value());
+  EXPECT_EQ(malformed_directory_result.error().code,
+            NKitV1ErrorCode::InvalidSequentialLayout);
 
   SyntheticN4NKitFixture exceptional = s_nkit;
   exceptional.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
@@ -1896,6 +2200,236 @@ TEST_F(NKitV1RandomAccessTest, O2PartialGeometryCorruptionFailsClosed)
   ASSERT_TRUE((*corrupt_payload_reader)->GetLastError().has_value());
   EXPECT_EQ((*corrupt_payload_reader)->GetLastError()->code,
             NKitV1ErrorCode::SourceIdentityMismatch);
+}
+
+TEST_F(NKitV1RandomAccessTest,
+       O3NestedFstMatchesByteOracleAndSurvivesDiscIOAndWbfs)
+{
+  const SyntheticN4ConventionalDisc conventional =
+      BuildSyntheticO3NestedConventionalDisc();
+  const SyntheticN4NKitFixture compact =
+      BuildSyntheticO3NestedNKitFixture(conventional);
+
+  std::unique_ptr<VolumeDisc> compact_volume = CreateDisc(compact.MakeReader());
+  ASSERT_NE(compact_volume, nullptr);
+  EXPECT_TRUE(compact_volume->IsNKit());
+  EXPECT_EQ(AnalyzeWbfs(*compact_volume).GetError(), WbfsAnalysisError::NKitSource);
+
+  auto created = TryCreateWiiNKitV1ReconstructedReader(compact.MakeReader());
+  ASSERT_TRUE(created.has_value());
+  NKitV1ReconstructedBlobReader& reader = **created;
+  const NKitV1SequentialPartition& planned = reader.GetIndex().GetPlan().GetPartition();
+  ASSERT_EQ(planned.GetFstEntries().size(), 9u);
+  EXPECT_EQ(planned.GetFstDirectoryCount(), 5u);
+  EXPECT_EQ(planned.GetFstFileCount(), 4u);
+  EXPECT_EQ(planned.GetMaximumDirectoryDepth(), 2u);
+  ASSERT_EQ(planned.GetFstOffsetPatches().size(), 4u);
+
+  const auto& entries = planned.GetFstEntries();
+  EXPECT_TRUE(entries[0].IsDirectory());
+  EXPECT_EQ(entries[0].GetParentIndex(), 0u);
+  EXPECT_EQ(entries[0].GetSubtreeEndIndex(), 9u);
+  EXPECT_FALSE(entries[1].IsDirectory());
+  EXPECT_TRUE(entries[2].IsDirectory());
+  EXPECT_EQ(entries[2].GetParentIndex(), 0u);
+  EXPECT_EQ(entries[2].GetSubtreeEndIndex(), 6u);
+  EXPECT_TRUE(entries[4].IsDirectory());
+  EXPECT_EQ(entries[4].GetParentIndex(), 2u);
+  EXPECT_EQ(entries[4].GetSubtreeEndIndex(), 6u);
+  EXPECT_EQ(entries[4].GetDirectoryDepth(), 2u);
+  EXPECT_EQ(entries[3].GetCompactedFileOffset(),
+            entries[5].GetCompactedFileOffset() +
+                Common::AlignUp(entries[5].GetFileSize(), 4ull));
+  EXPECT_TRUE(entries[6].IsDirectory());
+  EXPECT_EQ(entries[6].GetParentIndex(), 0u);
+  EXPECT_EQ(entries[6].GetSubtreeEndIndex(), 8u);
+  EXPECT_TRUE(entries[8].IsDirectory());
+  EXPECT_EQ(entries[8].GetSubtreeEndIndex(), 9u);
+
+  const std::array<u64, 4> patched_fields = {
+      FST_OFFSET + 1 * 12 + 4, FST_OFFSET + 3 * 12 + 4,
+      FST_OFFSET + 5 * 12 + 4, FST_OFFSET + 7 * 12 + 4};
+  for (const NKitV1FstOffsetPatch& patch : planned.GetFstOffsetPatches())
+    EXPECT_NE(std::ranges::find(patched_fields, patch.GetFieldOffset()), patched_fields.end());
+
+  const u64 raw_data = ORIGINAL_PARTITION_OFFSET + PARTITION_HEADER_SIZE;
+  const std::array<std::pair<u64, u64>, 4> random_ranges = {{
+      {raw_data + 2 * VolumeWii::GROUP_TOTAL_SIZE + 0x1234, 97},
+      {raw_data + 0x7ff0, 64},
+      {raw_data + VolumeWii::GROUP_TOTAL_SIZE - 31, 93},
+      {raw_data + 0x7ff0, 64},
+  }};
+  for (const std::pair<u64, u64>& range : random_ranges)
+  {
+    std::vector<u8> expected(static_cast<size_t>(range.second));
+    std::vector<u8> actual(expected.size());
+    ASSERT_TRUE(conventional.MakeReader()->Read(range.first, range.second, expected.data()));
+    ASSERT_TRUE(reader.Read(range.first, range.second, actual.data()));
+    EXPECT_EQ(actual, expected);
+  }
+  EXPECT_LE(reader.GetCacheStats().resident_bytes,
+            NKitV1ReconstructedBlobReader::CACHE_MEMORY_BOUND);
+
+  std::unique_ptr<VolumeDisc> volume = CreateDisc(reader.CopyReader());
+  ASSERT_NE(volume, nullptr);
+  EXPECT_EQ(volume->GetVolumeType(), Platform::WiiDisc);
+  EXPECT_EQ(volume->GetGameID(), "RO3P01");
+  EXPECT_FALSE(volume->IsNKit());
+  const Partition partition = volume->GetGamePartition();
+  ASSERT_NE(partition, PARTITION_NONE);
+  EXPECT_TRUE(volume->CheckH3TableIntegrity(partition));
+
+  std::unique_ptr<VolumeDisc> oracle_volume = CreateDisc(conventional.MakeReader());
+  ASSERT_NE(oracle_volume, nullptr);
+  const Partition oracle_partition = oracle_volume->GetGamePartition();
+  ASSERT_NE(oracle_partition, PARTITION_NONE);
+  std::array<u8, O3_FST_SIZE> expected_fst{};
+  std::array<u8, O3_FST_SIZE> actual_fst{};
+  ASSERT_TRUE(oracle_volume->Read(FST_OFFSET, expected_fst.size(), expected_fst.data(),
+                                  oracle_partition));
+  ASSERT_TRUE(volume->Read(FST_OFFSET, actual_fst.size(), actual_fst.data(), partition));
+  EXPECT_EQ(actual_fst, expected_fst);
+
+  const FileSystem* file_system = volume->GetFileSystem(partition);
+  ASSERT_NE(file_system, nullptr);
+  std::unique_ptr<FileInfo> dir_a = file_system->FindFileInfo("dir_a");
+  ASSERT_NE(dir_a, nullptr);
+  EXPECT_TRUE(dir_a->IsDirectory());
+  std::unique_ptr<FileInfo> dir_b = file_system->FindFileInfo("dir_a/dir_b");
+  ASSERT_NE(dir_b, nullptr);
+  EXPECT_TRUE(dir_b->IsDirectory());
+  std::unique_ptr<FileInfo> empty = file_system->FindFileInfo("empty_dir");
+  ASSERT_NE(empty, nullptr);
+  EXPECT_TRUE(empty->IsDirectory());
+  EXPECT_EQ(empty->GetTotalChildren(), 0u);
+  ExpectFile(*volume, partition, "root.bin", O3_ROOT_FILE, O3_ROOT_OFFSET);
+  ExpectFile(*volume, partition, "dir_a/alpha.bin", O3_ALPHA_FILE, O3_ALPHA_OFFSET);
+  ExpectFile(*volume, partition, "dir_a/dir_b/beta.bin", O3_BETA_FILE, O3_BETA_OFFSET);
+  ExpectFile(*volume, partition, "dir_c/gamma.bin", O3_GAMMA_FILE, O3_GAMMA_OFFSET);
+
+  const WbfsAnalysis analysis = AnalyzeWbfs(*volume);
+  ASSERT_TRUE(analysis.IsSuccessful());
+  const std::string destination = m_temp_directory + "/o3-nested.wbfs";
+  const WbfsWriteResult write = WriteWbfs(reader, analysis, destination);
+  ASSERT_EQ(write.status, WbfsWriteStatus::Success);
+  std::unique_ptr<VolumeDisc> reopened = CreateDisc(destination);
+  ASSERT_NE(reopened, nullptr);
+  EXPECT_EQ(reopened->GetGameID(), "RO3P01");
+  const Partition reopened_partition = reopened->GetGamePartition();
+  ASSERT_NE(reopened_partition, PARTITION_NONE);
+  ExpectFile(*reopened, reopened_partition, "root.bin", O3_ROOT_FILE, O3_ROOT_OFFSET);
+  ExpectFile(*reopened, reopened_partition, "dir_a/alpha.bin", O3_ALPHA_FILE,
+             O3_ALPHA_OFFSET);
+  ExpectFile(*reopened, reopened_partition, "dir_a/dir_b/beta.bin", O3_BETA_FILE,
+             O3_BETA_OFFSET);
+  ExpectFile(*reopened, reopened_partition, "dir_c/gamma.bin", O3_GAMMA_FILE,
+             O3_GAMMA_OFFSET);
+
+  const std::string cancelled_path = m_temp_directory + "/o3-cancelled.wbfs";
+  const WbfsWriteResult cancelled =
+      WriteWbfs(reader, analysis, cancelled_path, {}, [] { return true; });
+  EXPECT_EQ(cancelled.status, WbfsWriteStatus::Cancelled);
+  EXPECT_FALSE(File::Exists(cancelled_path));
+  for (const auto& entry : std::filesystem::directory_iterator(m_temp_directory))
+    EXPECT_FALSE(entry.path().filename().string().starts_with("o3-cancelled.xxx"));
+}
+
+TEST_F(NKitV1RandomAccessTest, O3LargeNestedFstPlans3000EntriesBoundedly)
+{
+  const SyntheticN4ConventionalDisc conventional =
+      BuildSyntheticO3LargeFstConventionalDisc();
+  const SyntheticN4NKitFixture compact =
+      BuildSyntheticO3NestedNKitFixture(conventional);
+  auto read_stats = std::make_shared<SparseReadStats>();
+  auto created = TryCreateWiiNKitV1ReconstructedReader(
+      compact.MakeReader(BlobType::PLAIN, read_stats));
+  ASSERT_TRUE(created.has_value());
+  const NKitV1SequentialPartition& partition =
+      (*created)->GetIndex().GetPlan().GetPartition();
+  EXPECT_EQ(partition.GetFstEntries().size(), O3_LARGE_FST_ENTRY_COUNT);
+  EXPECT_EQ(partition.GetFstDirectoryCount(), O3_LARGE_FST_ENTRY_COUNT - 4);
+  EXPECT_EQ(partition.GetFstFileCount(), 4u);
+  EXPECT_EQ(partition.GetMaximumDirectoryDepth(), 2u);
+  EXPECT_LT(partition.GetFstEntries().size() * sizeof(NKitV1FstEntry), 512 * 1024u);
+  EXPECT_LE(read_stats->maximum_read_size, WII_NKIT_V1_HEADER_SIZE);
+  EXPECT_LT(read_stats->total_bytes, 4 * 1024 * 1024u);
+
+  std::unique_ptr<VolumeDisc> volume = CreateDisc((*created)->CopyReader());
+  ASSERT_NE(volume, nullptr);
+  EXPECT_EQ(volume->GetGameID(), "RO3P01");
+  const Partition game_partition = volume->GetGamePartition();
+  ASSERT_NE(game_partition, PARTITION_NONE);
+  ExpectFile(*volume, game_partition, "dir_a/dir_b/beta.bin", O3_BETA_FILE,
+             O3_BETA_OFFSET);
+}
+
+TEST_F(NKitV1RandomAccessTest, O3MalformedDirectoryAndNestedGapCasesFailClosed)
+{
+  const SyntheticN4ConventionalDisc conventional =
+      BuildSyntheticO3NestedConventionalDisc();
+  const SyntheticN4NKitFixture valid =
+      BuildSyntheticO3NestedNKitFixture(conventional);
+  const u64 payload = SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE;
+  const u64 fst = payload + FST_OFFSET;
+
+  const auto expect_invalid_fst = [&](const std::function<void(std::vector<u8>&)>& mutate,
+                                      NKitV1ErrorCode expected_error =
+                                          NKitV1ErrorCode::InvalidSequentialLayout) {
+    SyntheticN4NKitFixture malformed = valid;
+    malformed.bytes = std::make_shared<std::vector<u8>>(*valid.bytes);
+    mutate(*malformed.bytes);
+    auto result = TryCreateWiiNKitV1ReconstructedReader(malformed.MakeReader());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, expected_error);
+  };
+
+  expect_invalid_fst([&](std::vector<u8>& bytes) { bytes[fst] = 0; });
+  expect_invalid_fst([&](std::vector<u8>& bytes) { WriteBigEndianU32(bytes, fst + 4, 1); });
+  expect_invalid_fst([&](std::vector<u8>& bytes) { WriteBigEndianU32(bytes, fst + 8, 8); });
+  expect_invalid_fst(
+      [&](std::vector<u8>& bytes) { WriteBigEndianU32(bytes, fst + 2 * 12 + 4, 99); });
+  expect_invalid_fst(
+      [&](std::vector<u8>& bytes) { WriteBigEndianU32(bytes, fst + 2 * 12 + 4, 6); });
+  expect_invalid_fst(
+      [&](std::vector<u8>& bytes) { WriteBigEndianU32(bytes, fst + 2 * 12 + 8, 2); });
+  expect_invalid_fst(
+      [&](std::vector<u8>& bytes) { WriteBigEndianU32(bytes, fst + 2 * 12 + 8, 1); });
+  expect_invalid_fst(
+      [&](std::vector<u8>& bytes) { WriteBigEndianU32(bytes, fst + 2 * 12 + 8, 10); });
+  expect_invalid_fst(
+      [&](std::vector<u8>& bytes) { WriteBigEndianU32(bytes, fst + 4 * 12 + 8, 7); });
+  expect_invalid_fst([&](std::vector<u8>& bytes) {
+    WriteBigEndianU32(bytes, fst + 1 * 12, 0x00ffffff);
+  });
+  expect_invalid_fst([&](std::vector<u8>& bytes) {
+    std::fill(bytes.begin() + fst + 9 * 12, bytes.begin() + fst + O3_FST_SIZE, 'x');
+  });
+  expect_invalid_fst([&](std::vector<u8>& bytes) {
+    WriteBigEndianU32(bytes, payload + 0x428, 26);
+  });
+  expect_invalid_fst([&](std::vector<u8>& bytes) {
+    WriteBigEndianU32(bytes, payload + 0x428, 27);
+  });
+  expect_invalid_fst(
+      [&](std::vector<u8>& bytes) {
+        WriteBigEndianU32(bytes, fst + 1 * 12 + 4, 0xffffffff);
+      },
+      NKitV1ErrorCode::InvalidRange);
+  expect_invalid_fst([&](std::vector<u8>& bytes) {
+    WriteBigEndianU32(bytes, fst + 2 * 12, 0x02000009);
+  });
+  expect_invalid_fst([&](std::vector<u8>& bytes) {
+    const u32 gamma_offset = ReadBigEndianU32(bytes, fst + 7 * 12 + 4);
+    WriteBigEndianU32(bytes, fst + 1 * 12 + 4, gamma_offset);
+  });
+
+  SyntheticN4NKitFixture malformed_gap = valid;
+  malformed_gap.bytes = std::make_shared<std::vector<u8>>(*valid.bytes);
+  WriteBigEndianU32(*malformed_gap.bytes, payload + malformed_gap.flags_offset + 4, 2);
+  auto gap_result = TryCreateWiiNKitV1ReconstructedReader(malformed_gap.MakeReader());
+  ASSERT_FALSE(gap_result.has_value());
+  EXPECT_TRUE(gap_result.error().code == NKitV1ErrorCode::MalformedGapRecord ||
+              gap_result.error().code == NKitV1ErrorCode::InvalidSequentialLayout);
 }
 
 TEST_F(NKitV1RandomAccessTest, DirectDiscIOAndAnalyzeWbfsSeeConventionalMultipleFileDisc)
@@ -2277,7 +2811,9 @@ TEST_F(NKitV1RandomAccessTest, N5BlockedSupportMatrixReturnsSpecificTypedReasons
 
   SyntheticN4NKitFixture gap = s_nkit;
   gap.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
-  (*gap.bytes)[SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE + FST_OFFSET + 12] = 1;
+  WriteBigEndianU32(*gap.bytes,
+                    SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE + FST_OFFSET + 2 * 12 + 8,
+                    0);
   expect(std::move(gap), DolphinQt::WiiExportNKitV1Support::UnsupportedGapContext);
 
   SyntheticN4NKitFixture hash = s_nkit;
@@ -2321,6 +2857,7 @@ TEST_F(NKitV1RandomAccessTest, N5BlockedSupportMatrixReturnsSpecificTypedReasons
   gamecube.platform = Platform::GameCubeDisc;
   EXPECT_FALSE(DolphinQt::IsWiiExportGameListEntryEligible(gamecube));
 }
+
 #endif
 
 }  // namespace
