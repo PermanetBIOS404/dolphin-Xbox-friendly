@@ -7,6 +7,7 @@
 #include <expected>
 #include <limits>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "Common/CommonTypes.h"
@@ -65,7 +66,10 @@ enum class NKitV1ErrorCode
   IntegrityCheckFailed,
   OutputWriteFailed,
   Cancelled,
+  HashHierarchyMismatch,
 };
+
+std::string_view GetNKitV1ErrorName(NKitV1ErrorCode code);
 
 struct NKitV1Error final
 {

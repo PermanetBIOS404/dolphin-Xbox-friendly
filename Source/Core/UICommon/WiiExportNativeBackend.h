@@ -9,6 +9,11 @@
 #include "DiscIO/WbfsWriter.h"
 #include "UICommon/WiiExportExecution.h"
 
+namespace DiscIO
+{
+class NKitV1ReconstructedBlobReader;
+}
+
 namespace UICommon
 {
 // Returns the canonical native-backend descriptor without requiring a prepared source or reader.
@@ -29,6 +34,10 @@ public:
   WiiExportNativeBackend(std::string source_path,
                          std::unique_ptr<DiscIO::BlobReader> source_reader,
                          DiscIO::WbfsAnalysis analysis);
+  WiiExportNativeBackend(
+      std::string source_path,
+      std::unique_ptr<DiscIO::NKitV1ReconstructedBlobReader> reconstructed_source_reader,
+      DiscIO::WbfsAnalysis analysis);
   ~WiiExportNativeBackend() override;
 
   WiiExportNativeBackend(const WiiExportNativeBackend&) = delete;

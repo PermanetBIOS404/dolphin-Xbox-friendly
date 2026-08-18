@@ -43,6 +43,7 @@ WiiExportNKitV1Support ClassifyNKitError(DiscIO::NKitV1ErrorCode code)
   case Code::UnsupportedGapContext:
     return WiiExportNKitV1Support::UnsupportedGapContext;
   case Code::UnsupportedHashOrScrub:
+  case Code::HashHierarchyMismatch:
     return WiiExportNKitV1Support::ExceptionalHashOrScrub;
   case Code::UnsupportedGameCube:
     return WiiExportNKitV1Support::GameCube;

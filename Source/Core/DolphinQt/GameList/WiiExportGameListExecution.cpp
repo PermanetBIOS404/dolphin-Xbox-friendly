@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "DiscIO/Blob.h"
+#include "DiscIO/NKitV1ReconstructedBlob.h"
 #include "DolphinQt/WiiExportDestinationInspector.h"
 #include "UICommon/WiiExportNativeBackend.h"
 #include "UICommon/WiiExportPreview.h"
@@ -52,6 +53,15 @@ CreateNativeBackend(const UICommon::WiiExportPreparedSource& prepared_source,
       prepared_source, {}, cancellation_query);
   if (!created.IsSuccessful())
     return nullptr;
+
+  if (prepared_source.recipe.kind ==
+      UICommon::WiiExportSourceRecipeKind::ReconstructedNKitV1)
+  {
+    auto reconstructed = std::unique_ptr<DiscIO::NKitV1ReconstructedBlobReader>(
+        static_cast<DiscIO::NKitV1ReconstructedBlobReader*>(created.reader.release()));
+    return std::make_unique<UICommon::WiiExportNativeBackend>(
+        prepared_source.source.source_path, std::move(reconstructed), *prepared_source.analysis);
+  }
 
   return std::make_unique<UICommon::WiiExportNativeBackend>(
       prepared_source.source.source_path, std::move(created.reader), *prepared_source.analysis);

@@ -1068,6 +1068,29 @@ SyntheticN4NKitFixture BuildSyntheticRemovedUpdateNKitFixture(
   return fixture;
 }
 
+// Reproduces the late retail failure class without retail data. The retained H3 table and TMD
+// agree with each other, but the last group's compact payload regenerates a different H3 and no
+// exceptional-hash preservation flag/data is present. This cannot be detected by AnalyzeWbfs,
+// which does not materialize every used group.
+SyntheticN4NKitFixture BuildSyntheticLateHashMismatchNKitFixture(
+    const SyntheticN4NKitFixture& valid)
+{
+  constexpr u64 mismatched_group = 2;
+  SyntheticN4NKitFixture fixture = valid;
+  fixture.bytes = std::make_shared<std::vector<u8>>(*valid.bytes);
+  std::vector<u8>& source = *fixture.bytes;
+  source[SOURCE_PARTITION_OFFSET + H3_OFFSET +
+         mismatched_group * Common::SHA1::DIGEST_LEN] ^= 0x80;
+  const std::span<const u8> h3_table(source.data() + SOURCE_PARTITION_OFFSET + H3_OFFSET,
+                                     WII_PARTITION_H3_SIZE);
+  std::vector<u8> tmd =
+      BuildSyntheticTmd(Common::SHA1::CalculateDigest(h3_table.data(), h3_table.size()));
+  WriteBigEndianU64(tmd, sizeof(IOS::ES::TMDHeader) + offsetof(IOS::ES::Content, size),
+                    fixture.raw_partition_size);
+  std::copy(tmd.begin(), tmd.end(), source.begin() + SOURCE_PARTITION_OFFSET + TMD_OFFSET);
+  return fixture;
+}
+
 constexpr u64 O2_RETAIL_FULL_GROUPS = 2109;
 constexpr u32 O2_RETAIL_FINAL_CLUSTERS = 52;
 constexpr u64 O2_RETAIL_GROUP_COUNT = O2_RETAIL_FULL_GROUPS + 1;
@@ -1874,7 +1897,8 @@ TEST_F(NKitV1RandomAccessTest, SourceMutationAndCancellationFailSafely)
   EXPECT_FALSE((*payload_reader)->Read(ORIGINAL_PARTITION_OFFSET + PARTITION_HEADER_SIZE, 1,
                                        byte.data()));
   ASSERT_TRUE((*payload_reader)->GetLastError().has_value());
-  EXPECT_EQ((*payload_reader)->GetLastError()->code, NKitV1ErrorCode::SourceIdentityMismatch);
+  EXPECT_EQ((*payload_reader)->GetLastError()->code,
+            NKitV1ErrorCode::HashHierarchyMismatch);
 
   auto cancelled = TryCreateWiiNKitV1ReconstructedReader(s_nkit.MakeReader(), [] { return true; });
   ASSERT_FALSE(cancelled.has_value());
@@ -2199,7 +2223,62 @@ TEST_F(NKitV1RandomAccessTest, O2PartialGeometryCorruptionFailsClosed)
                           1, byte.data()));
   ASSERT_TRUE((*corrupt_payload_reader)->GetLastError().has_value());
   EXPECT_EQ((*corrupt_payload_reader)->GetLastError()->code,
-            NKitV1ErrorCode::SourceIdentityMismatch);
+            NKitV1ErrorCode::HashHierarchyMismatch);
+}
+
+TEST_F(NKitV1RandomAccessTest,
+       O4LateUnpreservedHashMismatchIsFoundBeforeWbfsOutput)
+{
+  const SyntheticN4NKitFixture mismatch =
+      BuildSyntheticLateHashMismatchNKitFixture(s_nkit);
+  auto created = TryCreateWiiNKitV1ReconstructedReader(mismatch.MakeReader());
+  ASSERT_TRUE(created.has_value());
+  NKitV1ReconstructedBlobReader& reader = **created;
+
+  std::unique_ptr<VolumeDisc> volume = CreateDisc(reader.CopyReader());
+  ASSERT_NE(volume, nullptr);
+  const WbfsAnalysis analysis = AnalyzeWbfs(*volume);
+  ASSERT_TRUE(analysis.IsSuccessful());
+
+  const NKitV1WbfsReadValidationResult validation =
+      ValidateWiiNKitV1WbfsSourceReads(reader, analysis);
+  ASSERT_FALSE(validation.has_value());
+  EXPECT_EQ(validation.error().wbfs_block, 2u);
+  EXPECT_EQ(validation.error().logical_offset,
+            ORIGINAL_PARTITION_OFFSET + PARTITION_HEADER_SIZE +
+                2 * VolumeWii::GROUP_TOTAL_SIZE);
+  ASSERT_TRUE(validation.error().group_index.has_value());
+  EXPECT_EQ(*validation.error().group_index, 2u);
+  EXPECT_EQ(validation.error().error.code,
+            NKitV1ErrorCode::HashHierarchyMismatch);
+  EXPECT_EQ(GetNKitV1ErrorName(validation.error().error.code),
+            "HashHierarchyMismatch");
+
+  const std::string destination = m_temp_directory + "/o4-old-late-failure.wbfs";
+  const WbfsWriteResult old_path = WriteWbfs(reader, analysis, destination);
+  EXPECT_EQ(old_path.status, WbfsWriteStatus::SourceReadFailed);
+  EXPECT_FALSE(File::Exists(destination));
+  for (const auto& entry : std::filesystem::directory_iterator(m_temp_directory))
+    EXPECT_FALSE(entry.path().filename().string().starts_with("o4-old-late-failure.xxx"));
+}
+
+TEST_F(NKitV1RandomAccessTest,
+       O4FullUsedBlockValidationSucceedsAndCancelsBoundedly)
+{
+  auto reader = CopyReconstructedReader();
+  std::unique_ptr<VolumeDisc> volume = CreateDisc(reader->CopyReader());
+  ASSERT_NE(volume, nullptr);
+  const WbfsAnalysis analysis = AnalyzeWbfs(*volume);
+  ASSERT_TRUE(analysis.IsSuccessful());
+  EXPECT_TRUE(ValidateWiiNKitV1WbfsSourceReads(*reader, analysis).has_value());
+
+  auto cancelled_reader = CopyReconstructedReader();
+  int cancellation_checks = 0;
+  const NKitV1WbfsReadValidationResult cancelled = ValidateWiiNKitV1WbfsSourceReads(
+      *cancelled_reader, analysis, [&] { return ++cancellation_checks >= 2; });
+  ASSERT_FALSE(cancelled.has_value());
+  EXPECT_EQ(cancelled.error().error.code, NKitV1ErrorCode::Cancelled);
+  EXPECT_GE(cancellation_checks, 2);
 }
 
 TEST_F(NKitV1RandomAccessTest,
@@ -2728,6 +2807,42 @@ TEST_F(NKitV1RandomAccessTest, N5DefaultExecutionRebuildsAndWritesValidatedSynth
     EXPECT_FALSE(file.path().filename().string().starts_with("supported.xxx"));
   }
   EXPECT_EQ(regular_files, 2u);
+}
+
+TEST_F(NKitV1RandomAccessTest,
+       O4NKitExecutionValidatesAllUsedBlocksBeforeInvokingTheWriter)
+{
+  const SyntheticN4NKitFixture mismatch =
+      BuildSyntheticLateHashMismatchNKitFixture(s_nkit);
+  const std::string source_path = m_temp_directory + "/late-hash-mismatch.nkit.iso";
+  ASSERT_TRUE(WriteN5Fixture(source_path, mismatch));
+  const auto entry = MakeN5Entry(source_path);
+  const auto preparation = DolphinQt::PrepareWiiExportGameListSource(entry);
+  ASSERT_TRUE(preparation.IsSuccessful());
+
+  UICommon::WiiExportPreviewModel model(*preparation.prepared_source, N5NoCollisions);
+  ASSERT_TRUE(model.SelectDestination(MakeN5Destination(m_temp_directory)));
+  EXPECT_EQ(model.GetState().readiness, UICommon::WiiExportPreviewReadiness::Ready);
+  auto request = DolphinQt::CreateWiiExportGameListExecutionRequest(
+      entry, *preparation.prepared_source, model.GetState());
+  ASSERT_TRUE(request.has_value());
+
+  const auto result = DolphinQt::RunWiiExportGameListExecution(
+      *request, {}, {}, MakeN5ExecutionServices(m_temp_directory));
+  EXPECT_EQ(result.revalidation_error,
+            DolphinQt::WiiExportGameListRevalidationError::None);
+  ASSERT_TRUE(result.execution.has_value());
+  EXPECT_TRUE(result.execution_invoked);
+  EXPECT_EQ(result.execution->outcome, UICommon::WiiExportExecutionOutcome::Failed);
+  EXPECT_NE(result.execution->backend_diagnostic.find("partition hash data"),
+            std::string::npos);
+  EXPECT_NE(result.execution->backend_diagnostic.find("group 2"), std::string::npos);
+
+  const std::filesystem::path output =
+      std::filesystem::path(m_temp_directory) / model.GetState().plan.primary_relative_path;
+  EXPECT_FALSE(File::Exists(output.string()));
+  for (const auto& file : std::filesystem::recursive_directory_iterator(m_temp_directory))
+    EXPECT_FALSE(file.path().filename().string().starts_with("late-hash-mismatch.xxx"));
 }
 
 TEST_F(NKitV1RandomAccessTest, N5FreshIdentitySupportAndCancellationRevalidationAreAuthoritative)

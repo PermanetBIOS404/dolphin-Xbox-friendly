@@ -19,6 +19,84 @@
 
 namespace DiscIO
 {
+std::string_view GetNKitV1ErrorName(NKitV1ErrorCode code)
+{
+  switch (code)
+  {
+  case NKitV1ErrorCode::ReadFailed:
+    return "ReadFailed";
+  case NKitV1ErrorCode::NotWiiDisc:
+    return "NotWiiDisc";
+  case NKitV1ErrorCode::NotNKit:
+    return "NotNKit";
+  case NKitV1ErrorCode::UnsupportedVersion:
+    return "UnsupportedVersion";
+  case NKitV1ErrorCode::UnsupportedGameCube:
+    return "UnsupportedGameCube";
+  case NKitV1ErrorCode::InaccurateSourceSize:
+    return "InaccurateSourceSize";
+  case NKitV1ErrorCode::TruncatedHeader:
+    return "TruncatedHeader";
+  case NKitV1ErrorCode::TruncatedMetadata:
+    return "TruncatedMetadata";
+  case NKitV1ErrorCode::InvalidOriginalSize:
+    return "InvalidOriginalSize";
+  case NKitV1ErrorCode::InvalidGameId:
+    return "InvalidGameId";
+  case NKitV1ErrorCode::InvalidPartitionTable:
+    return "InvalidPartitionTable";
+  case NKitV1ErrorCode::MissingDataPartition:
+    return "MissingDataPartition";
+  case NKitV1ErrorCode::InvalidRange:
+    return "InvalidRange";
+  case NKitV1ErrorCode::ArithmeticOverflow:
+    return "ArithmeticOverflow";
+  case NKitV1ErrorCode::MalformedGapRecord:
+    return "MalformedGapRecord";
+  case NKitV1ErrorCode::UnexpectedEndOfInput:
+    return "UnexpectedEndOfInput";
+  case NKitV1ErrorCode::GapLimitExceeded:
+    return "GapLimitExceeded";
+  case NKitV1ErrorCode::OverlappingRanges:
+    return "OverlappingRanges";
+  case NKitV1ErrorCode::InvalidWiiGeometry:
+    return "InvalidWiiGeometry";
+  case NKitV1ErrorCode::ExternalRecoveryRequired:
+    return "ExternalRecoveryRequired";
+  case NKitV1ErrorCode::UnsupportedOuterContainer:
+    return "UnsupportedOuterContainer";
+  case NKitV1ErrorCode::UnsupportedDualLayer:
+    return "UnsupportedDualLayer";
+  case NKitV1ErrorCode::UnsupportedAdditionalPartitions:
+    return "UnsupportedAdditionalPartitions";
+  case NKitV1ErrorCode::UnsupportedPartitionLayout:
+    return "UnsupportedPartitionLayout";
+  case NKitV1ErrorCode::UnsupportedHashOrScrub:
+    return "UnsupportedHashOrScrub";
+  case NKitV1ErrorCode::UnsupportedReconstructionFeature:
+    return "UnsupportedReconstructionFeature";
+  case NKitV1ErrorCode::UnsupportedGapContext:
+    return "UnsupportedGapContext";
+  case NKitV1ErrorCode::InvalidSequentialLayout:
+    return "InvalidSequentialLayout";
+  case NKitV1ErrorCode::InvalidReconstructionIndex:
+    return "InvalidReconstructionIndex";
+  case NKitV1ErrorCode::InvalidRemovedUpdatePlaceholder:
+    return "InvalidRemovedUpdatePlaceholder";
+  case NKitV1ErrorCode::SourceIdentityMismatch:
+    return "SourceIdentityMismatch";
+  case NKitV1ErrorCode::IntegrityCheckFailed:
+    return "IntegrityCheckFailed";
+  case NKitV1ErrorCode::OutputWriteFailed:
+    return "OutputWriteFailed";
+  case NKitV1ErrorCode::Cancelled:
+    return "Cancelled";
+  case NKitV1ErrorCode::HashHierarchyMismatch:
+    return "HashHierarchyMismatch";
+  }
+  return "Unknown";
+}
+
 namespace
 {
 constexpr u64 MINIMUM_IDENTIFICATION_SIZE = WII_NKIT_V1_METADATA_OFFSET + 0x20;

@@ -1579,3 +1579,105 @@ and representative Physical SD smoke is 3/3. The full Dolphin suite was not run 
 bounded affected matrix is green. Aggregate tests and the production `dolphin-emu` executable
 link successfully, with all compilation limited to `-j2` and final single-process link steps below
 that ceiling. Kirby's before/after SHA-256, size, and nanosecond mtime match exactly.
+
+## 22. O4 retail compatibility: late full-write hash validation
+
+The first controlled retail export after O3 reached the native writer and failed at about 75%
+with `WbfsWriteStatus::SourceReadFailed`; existing WBFS rollback removed every staging and final
+file. The requested `/tmp/dolphin-rwin-kirby-diagnostic.log` did not contain the temporary NKit
+messages (only three unrelated null-pixmap warnings), so the failure was reproduced without output
+using a disposable read-only traversal linked to the exact committed O3 code.
+
+That traversal identified WBFS logical block 2,233 (used-block ordinal 1,825), whose read starts at
+disc offset `0x117200000`. Group 2,108 materializes successfully. When the same block crosses the
+next index range at `0x117220000`, final partial group 2,109 (52 clusters) fails. Committed O3
+returned numeric error 30, `SourceIdentityMismatch`, with error-offset field `0x83d` and partition
+0. The field was carrying the group index, not a failed compact read address. The error originates
+in `ReconstructWiiNKitV1PartitionGroup` after decrypted-span materialization and
+`VolumeWii::HashGroup`: SHA-1 over the regenerated H2 table does not equal the retained group H3.
+It is therefore not a source-file identity mutation, source-backed read failure, gap parse,
+encryption failure, WBFS bug, or index/cache overrun.
+
+The contributing final-group compact file data begins at absolute source offset `0xdcc6bd10` and
+runs for `0x18ffe0` bytes. The canonical tail record is at `0xdcdfbcf0` and describes the final
+`0x3020`-byte all-junk gap, including the normal 28-byte leading-null rule. The compact stream ends
+exactly at `0xdce00000`. The retained expected H3 is
+`3516fe41bb9b04d231b98e954741c671b25a0998`; the canonical regenerated H3 is
+`a3b56d1c6005a84850e3ab0cf2c80a8438fb4f17`. All 264 bytes of group hash-preservation flags are
+zero, including group 2,109. Independent reconstruction using the pinned MIT NKit-v1 junk and Wii
+hash rules produced the same regenerated value, and alternative leading-null/zero-tail and unused
+hash-slot variants did not produce the retained value.
+
+### Classification and canonical boundary
+
+This is a class-B retail construct: an **unpreserved reconstructed-hash/H3 mismatch**, not an O1,
+O2, or O3 implementation regression. Neighboring group 2,108 uses the same final file and passes;
+the final group has no exceptional-hash payload from which the retained hierarchy can be restored.
+An H3 digest is not sufficient to recover the missing bytes or hash areas.
+
+The pinned reference regenerates normal hashes for an unflagged group. Its `repairBlocks` result can
+report that the regenerated group is inconsistent with retained H3, but the conversion loop does
+not make that result fatal and can emit the regenerated group. Dolphin cannot copy that behavior
+blindly: retaining H3 fails the conventional H3 chain, while replacing H3 also changes the TMD
+content digest protected by the retail signature. The architecture has always required H3/TMD
+consistency, so O4 does not fabricate zeros, ignore integrity, or rewrite signed metadata merely to
+let the writer finish. Recovery or a separately proven playable repair policy is required before
+this class can be exported.
+
+### Generic production behavior
+
+O4 adds the distinct typed error `HashHierarchyMismatch` (numeric 34) and a stable error-name
+formatter; `SourceIdentityMismatch` remains reserved for actual source identity changes. The
+random-access reader now retains the precise reconstructed logical offset at which a read failed.
+
+`ValidateWiiNKitV1WbfsSourceReads` consumes an already successful `WbfsAnalysis` and materializes
+every used logical WBFS block through the production reconstructed reader without creating output.
+It returns the WBFS block, exact failing logical offset, reconstructed group when applicable, and
+the original typed NKit error. It uses one fixed 2 MiB traversal buffer plus the reader's existing
+two-group/4 MiB cache, is cancellation-aware, and scales with used blocks rather than allocating a
+disc image.
+
+The N5 native backend receives the concrete reconstructed-reader type for reconstructed recipes
+and runs this validation during the existing indeterminate Preparing stage, before creating output
+directories or invoking `WriteWbfs`. A failure logs the enum name/numeric code, logical offset,
+WBFS block, group, error field, and partition. The user-facing hash case says that the image
+contains partition hash data which cannot be reconstructed and explicitly confirms that no output
+was created. Direct ISO/RVZ sources and direct compact-NKit rejection are unchanged. Preview is not
+made to perform this full-disc traversal, so Kirby can still show Ready; execution now fails early
+and precisely during Preparing rather than after a partial multi-gigabyte write.
+
+### Synthetic and retail read-only proof
+
+The synthetic late-failure fixture changes an invented final used group's retained H3 and updates
+the synthetic TMD digest so planning and `AnalyzeWbfs` remain successful, while deliberately
+providing no preservation flag/data capable of regenerating that H3. This reproduces committed
+O3's later `WriteWbfs` `SourceReadFailed`. O4's full-used-block validator identifies the exact
+late group before output; the integrated backend never invokes the writer and leaves no directory,
+final file, or staging residue. A valid fixture traverses every used block, writes and reopens its
+WBFS with exact files, and the validation cancellation path remains clean.
+
+The final authorized Kirby read-only pass confirms 2,110 groups, 52 clusters in the final group,
+2,114 index ranges, and 1,826 used WBFS blocks. Groups 2,107 and 2,108 reconstruct; group 2,109
+still returns `HashHierarchyMismatch`. Unchanged `AnalyzeWbfs` succeeds, but the complete used-block
+pass stops only at block 2,233 / logical offset `0x117220000`. This is the intended fail-closed
+result: O4 diagnoses and prevents the unsafe export but does not claim to have recovered absent
+hash-critical material. Kirby remains preview-Ready because preview is intentionally bounded; it
+is not currently safe to convert.
+
+### Next compatibility boundary
+
+The next retail-compatibility investigation should determine whether authoritative recovery data
+can supply the missing final-group hierarchy or whether a Wii-verified playable repair exists that
+preserves the signed TMD trust chain. Until that is proven with synthetic integrity and boot-path
+evidence, `HashHierarchyMismatch` remains blocked. The next manual acceptance check should use the
+isolated O4 binary only to confirm that Kirby now stops during Preparing with the precise hash
+diagnostic and creates no output; it should not retry a full conversion.
+
+### O4 validation checkpoint
+
+The isolated Ninja `RelWithDebInfo` configuration has tests and Qt enabled. O4 focused coverage is
+3/3; O3 is 3/3; O2 is 4/4; O1 is 7/7; the current N5 slice is 7/7; N4 is 8/8; N3 is 10/10; and
+N2 is 43/43. The complete affected NKit/Wii Export/WBFS matrix is 263/263, and representative
+Physical SD smoke is 3/3. The full suite was not run because the bounded matrix was green. Both
+`tests` and `dolphin-emu` link successfully, every build invocation used `-j2`, and Kirby's
+before/after SHA-256, size, and nanosecond mtime match exactly.

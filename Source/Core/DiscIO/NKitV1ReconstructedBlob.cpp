@@ -5,12 +5,14 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <span>
 #include <utility>
 
 #include "DiscIO/NKitV1.h"
 #include "DiscIO/NKitV1Reconstruction.h"
+#include "DiscIO/WbfsWriter.h"
 
 namespace DiscIO
 {
@@ -137,9 +139,11 @@ std::unique_ptr<BlobReader> NKitV1ReconstructedBlobReader::CopyReader() const
       new NKitV1ReconstructedBlobReader(std::move(source_copy), m_index));
 }
 
-bool NKitV1ReconstructedBlobReader::Fail(NKitV1Error error)
+bool NKitV1ReconstructedBlobReader::Fail(NKitV1Error error,
+                                         std::optional<u64> logical_offset)
 {
   m_last_error = error;
+  m_last_failure_logical_offset = logical_offset;
   return false;
 }
 
@@ -209,13 +213,17 @@ NKitV1ReconstructedCacheStats NKitV1ReconstructedBlobReader::GetCacheStats() con
 bool NKitV1ReconstructedBlobReader::Read(u64 offset, u64 size, u8* out_ptr)
 {
   m_last_error.reset();
+  m_last_failure_logical_offset.reset();
   if ((size != 0 && out_ptr == nullptr) || offset > GetDataSize() || size > GetDataSize() - offset)
-    return Fail(Error(NKitV1ErrorCode::InvalidRange, offset));
+    return Fail(Error(NKitV1ErrorCode::InvalidRange, offset), offset);
   if (size == 0)
     return true;
   auto identity = RevalidateSourceIdentity();
   if (!identity)
+  {
+    m_last_failure_logical_offset = offset;
     return false;
+  }
 
   const std::vector<NKitV1ReconstructedRange>& ranges = m_index->GetRanges();
   auto range = std::upper_bound(ranges.begin(), ranges.end(), offset,
@@ -232,7 +240,7 @@ bool NKitV1ReconstructedBlobReader::Read(u64 offset, u64 size, u8* out_ptr)
     if (range == ranges.end() || offset < range->GetOffset() ||
         offset >= range->GetOffset() + range->GetLength())
     {
-      return Fail(Error(NKitV1ErrorCode::InvalidReconstructionIndex, offset));
+      return Fail(Error(NKitV1ErrorCode::InvalidReconstructionIndex, offset), offset);
     }
     const u64 delta = offset - range->GetOffset();
     const u64 count = std::min(size, range->GetLength() - delta);
@@ -244,7 +252,7 @@ bool NKitV1ReconstructedBlobReader::Read(u64 offset, u64 size, u8* out_ptr)
       break;
     case NKitV1ReconstructedRangeKind::Source:
       if (!m_source->Read(range->GetSourceOffset() + delta, count, out_ptr))
-        return Fail(Error(NKitV1ErrorCode::ReadFailed, range->GetSourceOffset() + delta));
+        return Fail(Error(NKitV1ErrorCode::ReadFailed, range->GetSourceOffset() + delta), offset);
       break;
     case NKitV1ReconstructedRangeKind::Fill:
       std::fill_n(out_ptr, static_cast<size_t>(count), range->GetFillByte());
@@ -257,10 +265,10 @@ bool NKitV1ReconstructedBlobReader::Read(u64 offset, u64 size, u8* out_ptr)
            metadata.GetGameId()[3]},
           metadata.GetDiscNumber(), metadata.GetOriginalSize());
       if (!junk)
-        return Fail(junk.error());
+        return Fail(junk.error(), offset);
       auto generated = junk->Generate(offset, std::span<u8>(out_ptr, static_cast<size_t>(count)));
       if (!generated)
-        return Fail(generated.error());
+        return Fail(generated.error(), offset);
       break;
     }
     case NKitV1ReconstructedRangeKind::GeneratedPartitionHeader:
@@ -271,9 +279,12 @@ bool NKitV1ReconstructedBlobReader::Read(u64 offset, u64 size, u8* out_ptr)
     {
       auto group = GetGroup(range->GetGroupIndex(), {});
       if (!group)
+      {
+        m_last_failure_logical_offset = offset;
         return false;
+      }
       if (delta > (*group)->valid_size || count > (*group)->valid_size - delta)
-        return Fail(Error(NKitV1ErrorCode::InvalidReconstructionIndex, offset));
+        return Fail(Error(NKitV1ErrorCode::InvalidReconstructionIndex, offset), offset);
       std::memcpy(out_ptr, (*group)->bytes->data() + delta, static_cast<size_t>(count));
       break;
     }
@@ -285,6 +296,63 @@ bool NKitV1ReconstructedBlobReader::Read(u64 offset, u64 size, u8* out_ptr)
       ++range;
   }
   return true;
+}
+
+NKitV1WbfsReadValidationResult ValidateWiiNKitV1WbfsSourceReads(
+    NKitV1ReconstructedBlobReader& reader, const WbfsAnalysis& analysis,
+    const std::function<bool()>& cancellation_callback)
+{
+  const auto fail = [&](u64 wbfs_block, u64 logical_offset, NKitV1Error error) {
+    std::optional<u64> group_index;
+    const std::vector<NKitV1ReconstructedRange>& ranges = reader.GetIndex().GetRanges();
+    auto range = std::upper_bound(ranges.begin(), ranges.end(), logical_offset,
+                                  [](u64 value, const NKitV1ReconstructedRange& candidate) {
+                                    return value < candidate.GetOffset();
+                                  });
+    if (range != ranges.begin())
+    {
+      --range;
+      if (logical_offset >= range->GetOffset() &&
+          logical_offset - range->GetOffset() < range->GetLength() &&
+          range->GetKind() == NKitV1ReconstructedRangeKind::ReconstructedPartitionGroup)
+      {
+        group_index = range->GetGroupIndex();
+      }
+    }
+    return std::unexpected(
+        NKitV1WbfsReadValidationFailure{wbfs_block, logical_offset, group_index, error});
+  };
+
+  if (!analysis.IsSuccessful() || analysis.GetWbfsBlockSize() != WBFS_BLOCK_SIZE ||
+      analysis.GetSourceLogicalSize() != reader.GetDataSize())
+  {
+    return fail(0, 0, Error(NKitV1ErrorCode::InvalidWiiGeometry));
+  }
+
+  std::vector<u8> block_buffer(WBFS_BLOCK_SIZE);
+  const std::vector<bool>& used_blocks = analysis.GetUsedWbfsBlocks();
+  for (u64 block = 0; block < used_blocks.size(); ++block)
+  {
+    if (!used_blocks[block])
+      continue;
+    if (block > std::numeric_limits<u64>::max() / WBFS_BLOCK_SIZE)
+      return fail(block, 0, Error(NKitV1ErrorCode::ArithmeticOverflow));
+    const u64 offset = block * WBFS_BLOCK_SIZE;
+    if (cancellation_callback && cancellation_callback())
+      return fail(block, offset, Error(NKitV1ErrorCode::Cancelled));
+    if (offset >= analysis.GetSourceLogicalSize())
+      return fail(block, offset, Error(NKitV1ErrorCode::InvalidRange, offset));
+
+    const u64 size = std::min(WBFS_BLOCK_SIZE, analysis.GetSourceLogicalSize() - offset);
+    if (!reader.Read(offset, size, block_buffer.data()))
+    {
+      const u64 failure_offset = reader.GetLastFailureLogicalOffset().value_or(offset);
+      const NKitV1Error error =
+          reader.GetLastError().value_or(Error(NKitV1ErrorCode::ReadFailed, failure_offset));
+      return fail(block, failure_offset, error);
+    }
+  }
+  return {};
 }
 
 NKitV1Result<std::unique_ptr<NKitV1ReconstructedBlobReader>>

@@ -10,9 +10,13 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include "Common/FileUtil.h"
+#include "Common/Logging/Log.h"
 #include "Common/ScopeGuard.h"
 #include "Common/StringUtil.h"
+#include "DiscIO/NKitV1ReconstructedBlob.h"
 #include "UICommon/WiiExportNativeBackendPrivate.h"
 
 namespace UICommon
@@ -101,6 +105,34 @@ std::string GetWriteFailureDiagnostic(DiscIO::WbfsWriteStatus status)
     return "native WBFS writer could not finalize the destination";
   }
   return "native WBFS writer returned an unknown status";
+}
+
+std::string GetNKitValidationDiagnostic(
+    const DiscIO::NKitV1WbfsReadValidationFailure& failure)
+{
+  const std::string group =
+      failure.group_index ? fmt::format("{}", *failure.group_index) : "not applicable";
+  ERROR_LOG_FMT(DISCIO,
+                "NKit WBFS source validation failed before writing: error={} ({}), "
+                "logical_offset={:#x}, wbfs_block={}, group={}, error_offset={:#x}, "
+                "partition={}",
+                DiscIO::GetNKitV1ErrorName(failure.error.code),
+                std::to_underlying(failure.error.code), failure.logical_offset,
+                failure.wbfs_block, group, failure.error.source_offset,
+                failure.error.partition_index);
+
+  if (failure.error.code == DiscIO::NKitV1ErrorCode::HashHierarchyMismatch)
+  {
+    return fmt::format(
+        "This NKit image contains partition hash data that cannot be reconstructed from the "
+        "stored image (group {}, logical offset {:#x}). No output was created.",
+        group, failure.logical_offset);
+  }
+  return fmt::format(
+      "NKit reconstructed-source validation failed before writing: {} (code {}, logical "
+      "offset {:#x}, WBFS block {}, group {}). No output was created.",
+      DiscIO::GetNKitV1ErrorName(failure.error.code),
+      std::to_underlying(failure.error.code), failure.logical_offset, failure.wbfs_block, group);
 }
 
 bool IsSafeRelativePath(const fs::path& path)
@@ -337,7 +369,19 @@ public:
   {
   }
 
+  Impl(std::string prepared_source_path,
+       std::unique_ptr<DiscIO::NKitV1ReconstructedBlobReader> prepared_source_reader,
+       DiscIO::WbfsAnalysis prepared_analysis,
+       std::unique_ptr<WiiExportNativeBackendDetails::Writer> prepared_writer)
+      : source_path(std::move(prepared_source_path)),
+        reconstructed_source_reader(prepared_source_reader.get()),
+        source_reader(std::move(prepared_source_reader)), analysis(std::move(prepared_analysis)),
+        writer(std::move(prepared_writer)), descriptor(GetWiiExportNativeBackendDescriptor())
+  {
+  }
+
   std::string source_path;
+  DiscIO::NKitV1ReconstructedBlobReader* reconstructed_source_reader = nullptr;
   std::unique_ptr<DiscIO::BlobReader> source_reader;
   const DiscIO::WbfsAnalysis analysis;
   std::unique_ptr<WiiExportNativeBackendDetails::Writer> writer;
@@ -349,6 +393,16 @@ WiiExportNativeBackend::WiiExportNativeBackend(
     DiscIO::WbfsAnalysis analysis)
     : WiiExportNativeBackend(std::move(source_path), std::move(source_reader), std::move(analysis),
                              std::make_unique<NativeWriter>())
+{
+}
+
+WiiExportNativeBackend::WiiExportNativeBackend(
+    std::string source_path,
+    std::unique_ptr<DiscIO::NKitV1ReconstructedBlobReader> reconstructed_source_reader,
+    DiscIO::WbfsAnalysis analysis)
+    : m_impl(std::make_unique<Impl>(std::move(source_path),
+                                    std::move(reconstructed_source_reader), std::move(analysis),
+                                    std::make_unique<NativeWriter>()))
 {
 }
 
@@ -400,6 +454,18 @@ WiiExportBackendResult WiiExportNativeBackend::Execute(
     return Failed(output.diagnostic);
   if (cancellation_query && cancellation_query())
     return Cancelled("native WBFS export cancelled before writing");
+
+  if (m_impl->reconstructed_source_reader)
+  {
+    const auto validation = DiscIO::ValidateWiiNKitV1WbfsSourceReads(
+        *m_impl->reconstructed_source_reader, m_impl->analysis, cancellation_query);
+    if (!validation)
+    {
+      if (validation.error().error.code == DiscIO::NKitV1ErrorCode::Cancelled)
+        return Cancelled("NKit reconstructed-source validation was cancelled before writing");
+      return Failed(GetNKitValidationDiagnostic(validation.error()));
+    }
+  }
 
   std::vector<std::string> created_directories;
   Common::ScopeGuard directory_cleanup(

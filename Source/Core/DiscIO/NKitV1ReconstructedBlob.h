@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <expected>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -17,6 +18,7 @@
 namespace DiscIO
 {
 class NKitV1ReconstructionIndex;
+class WbfsAnalysis;
 
 enum class NKitV1ReconstructedRangeKind
 {
@@ -88,6 +90,17 @@ struct NKitV1ReconstructedCacheStats final
   size_t resident_bytes = 0;
 };
 
+struct NKitV1WbfsReadValidationFailure final
+{
+  u64 wbfs_block = 0;
+  u64 logical_offset = 0;
+  std::optional<u64> group_index;
+  NKitV1Error error{NKitV1ErrorCode::ReadFailed};
+};
+
+using NKitV1WbfsReadValidationResult =
+    std::expected<void, NKitV1WbfsReadValidationFailure>;
+
 // Presents a validated compact Wii NKit v1 source as a conventional random-readable raw disc.
 // Like BlobReader itself, one instance is not thread-safe. CopyReader supplies an independent
 // source reader and independent bounded cache while sharing only the immutable index.
@@ -115,6 +128,10 @@ public:
   const NKitV1ReconstructionIndex& GetIndex() const { return *m_index; }
   NKitV1ReconstructedCacheStats GetCacheStats() const;
   const std::optional<NKitV1Error>& GetLastError() const { return m_last_error; }
+  const std::optional<u64>& GetLastFailureLogicalOffset() const
+  {
+    return m_last_failure_logical_offset;
+  }
 
   NKitV1Result<void> RevalidateSourceIdentity();
   NKitV1Result<void> PrewarmGroup(
@@ -140,7 +157,7 @@ private:
 
   NKitV1Result<const CachedGroup*>
   GetGroup(u64 group_index, const std::function<bool()>& cancellation_callback);
-  bool Fail(NKitV1Error error);
+  bool Fail(NKitV1Error error, std::optional<u64> logical_offset = std::nullopt);
 
   std::unique_ptr<BlobReader> m_source;
   std::shared_ptr<const NKitV1ReconstructionIndex> m_index;
@@ -148,7 +165,15 @@ private:
   u64 m_cache_clock = 0;
   NKitV1ReconstructedCacheStats m_cache_stats;
   std::optional<NKitV1Error> m_last_error;
+  std::optional<u64> m_last_failure_logical_offset;
 };
+
+// Materializes every reconstructed logical block selected by an existing WBFS analysis without
+// creating output. This catches lazy reconstruction failures before the writer creates staging
+// files and preserves the precise NKit error, logical offset, and group context.
+NKitV1WbfsReadValidationResult ValidateWiiNKitV1WbfsSourceReads(
+    NKitV1ReconstructedBlobReader& reader, const WbfsAnalysis& analysis,
+    const std::function<bool()>& cancellation_callback = {});
 
 // Production factory boundary for N5/O1. It identifies exact Wii NKit v1, validates the complete
 // supported record/index set, and returns a conventional view. The supported set includes the

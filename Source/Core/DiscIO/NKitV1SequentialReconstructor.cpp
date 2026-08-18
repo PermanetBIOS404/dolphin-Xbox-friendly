@@ -1213,7 +1213,7 @@ NKitV1Result<u64> ReconstructWiiNKitV1PartitionGroup(
       !std::equal(h3.begin(), h3.end(),
                   partition.GetReconstructedHeader().begin() + h3_position))
   {
-    return std::unexpected(Error(NKitV1ErrorCode::SourceIdentityMismatch, group_index,
+    return std::unexpected(Error(NKitV1ErrorCode::HashHierarchyMismatch, group_index,
                                  partition_index));
   }
 
