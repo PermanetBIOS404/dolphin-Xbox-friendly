@@ -67,6 +67,32 @@ private:
   u64 m_reconstructed_file_offset = 0;
 };
 
+class NKitV1PartitionGroupGeometry final
+{
+public:
+  u64 GetGroupIndex() const { return m_group_index; }
+  u64 GetFirstClusterIndex() const { return m_first_cluster_index; }
+  u32 GetPresentClusterCount() const { return m_present_cluster_count; }
+  u64 GetRawOffset() const { return m_raw_offset; }
+  u64 GetRawSize() const { return m_raw_size; }
+  u64 GetDecryptedOffset() const { return m_decrypted_offset; }
+  u64 GetDecryptedSize() const { return m_decrypted_size; }
+
+private:
+  friend NKitV1Result<class NKitV1SequentialReconstructionPlan>
+  BuildWiiNKitV1SequentialReconstructionPlan(
+      BlobReader& source, const NKitV1ReconstructionPlan& foundation_plan,
+      const std::function<bool()>& cancellation_callback);
+
+  u64 m_group_index = 0;
+  u64 m_first_cluster_index = 0;
+  u32 m_present_cluster_count = 0;
+  u64 m_raw_offset = 0;
+  u64 m_raw_size = 0;
+  u64 m_decrypted_offset = 0;
+  u64 m_decrypted_size = 0;
+};
+
 class NKitV1SequentialPartition final
 {
 public:
@@ -83,7 +109,9 @@ public:
   }
   const std::array<u8, 4>& GetId() const { return m_id; }
   u8 GetDiscNumber() const { return m_disc_number; }
-  u64 GetGroupCount() const { return m_raw_data_size / VolumeWii::GROUP_TOTAL_SIZE; }
+  u64 GetGroupCount() const { return m_groups.size(); }
+  const NKitV1PartitionGroupGeometry& GetGroup(u64 index) const { return m_groups[index]; }
+  const std::vector<NKitV1PartitionGroupGeometry>& GetGroups() const { return m_groups; }
   const std::vector<NKitV1FstOffsetPatch>& GetFstOffsetPatches() const
   {
     return m_fst_offset_patches;
@@ -111,6 +139,7 @@ private:
   std::vector<u8> m_reconstructed_header;
   std::vector<NKitV1SequentialSpan> m_decrypted_spans;
   std::vector<NKitV1FstOffsetPatch> m_fst_offset_patches;
+  std::vector<NKitV1PartitionGroupGeometry> m_groups;
   std::array<u8, 4> m_id{};
   u8 m_disc_number = 0;
 };
@@ -173,11 +202,10 @@ struct NKitV1SequentialReconstructionResult final
   u64 groups_reconstructed = 0;
 };
 
-// The N4 production subset supports one normal-hash data partition, multiple complete raw
-// 64-cluster groups, root-level regular FST files, canonical leading-null gap context, no
-// exceptional preserved hashes, and either a self-contained disc prefix or the canonical removed
-// update-partition placeholder. The latter produces a playable conventional view with a synthetic
-// zero-filled non-game region while preserving its external archival-recovery assessment.
+// The O2 production subset supports one normal-hash data partition, any number of complete raw
+// 64-cluster groups followed by an optional 1..63-cluster final group, root-level regular FST
+// files, canonical leading-null gap context, no exceptional preserved hashes, and either a
+// self-contained disc prefix or the canonical removed-update placeholder.
 NKitV1Result<NKitV1SequentialReconstructionPlan>
 BuildWiiNKitV1SequentialReconstructionPlan(
     BlobReader& source, const NKitV1ReconstructionPlan& foundation_plan,
@@ -189,9 +217,10 @@ NKitV1Result<void>
 ValidateWiiNKitV1SequentialSource(BlobReader& source,
                                   const NKitV1SequentialReconstructionPlan& plan);
 
-// Reconstructs one encrypted conventional 2 MiB partition group. The caller owns the bounded
-// output buffer, making this the shared transform for sequential and random-access readers.
-NKitV1Result<void> ReconstructWiiNKitV1PartitionGroup(
+// Reconstructs one conventional partition group. Hashing operates on the canonical zero-padded
+// 64-cluster hierarchy, but only the group's physically present encrypted clusters are valid.
+// The returned size is therefore 2 MiB for complete groups and smaller for a final partial group.
+NKitV1Result<u64> ReconstructWiiNKitV1PartitionGroup(
     BlobReader& source, const NKitV1SequentialReconstructionPlan& plan, u64 group_index,
     std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>* encrypted,
     const std::function<bool()>& cancellation_callback = {});

@@ -36,7 +36,8 @@ BuildWiiNKitV1ReconstructionIndex(NKitV1SequentialReconstructionPlan plan)
   const auto append = [&](NKitV1ReconstructedRangeKind kind, u64 offset, u64 length,
                           u64 source_offset, u8 fill_byte, u64 group_index)
       -> NKitV1Result<void> {
-    if (length == 0 || offset != cursor || length > index->GetReconstructedSize() - cursor)
+    if (length == 0 || offset != cursor || cursor > index->GetReconstructedSize() ||
+        length > index->GetReconstructedSize() - cursor)
       return std::unexpected(Error(NKitV1ErrorCode::InvalidReconstructionIndex, offset));
     if (kind == NKitV1ReconstructedRangeKind::Source)
     {
@@ -80,12 +81,33 @@ BuildWiiNKitV1ReconstructionIndex(NKitV1SequentialReconstructionPlan plan)
                   0, 0, 0);
   if (!result)
     return std::unexpected(result.error());
-  for (u64 group = 0; group < partition.GetGroupCount(); ++group)
+  u64 expected_group_index = 0;
+  for (const NKitV1PartitionGroupGeometry& group : partition.GetGroups())
   {
+    const bool is_final = expected_group_index + 1 == partition.GetGroupCount();
+    if (group.GetGroupIndex() != expected_group_index ||
+        group.GetFirstClusterIndex() !=
+            expected_group_index * VolumeWii::BLOCKS_PER_GROUP ||
+        group.GetPresentClusterCount() == 0 ||
+        group.GetPresentClusterCount() > VolumeWii::BLOCKS_PER_GROUP ||
+        (!is_final && group.GetPresentClusterCount() != VolumeWii::BLOCKS_PER_GROUP) ||
+        group.GetRawOffset() !=
+            expected_group_index * VolumeWii::GROUP_TOTAL_SIZE ||
+        group.GetRawSize() !=
+            group.GetPresentClusterCount() * VolumeWii::BLOCK_TOTAL_SIZE ||
+        group.GetDecryptedOffset() !=
+            expected_group_index * VolumeWii::GROUP_DATA_SIZE ||
+        group.GetDecryptedSize() !=
+            group.GetPresentClusterCount() * VolumeWii::BLOCK_DATA_SIZE)
+    {
+      return std::unexpected(
+          Error(NKitV1ErrorCode::InvalidReconstructionIndex, cursor));
+    }
     result = append(NKitV1ReconstructedRangeKind::ReconstructedPartitionGroup, cursor,
-                    VolumeWii::GROUP_TOTAL_SIZE, 0, 0, group);
+                    group.GetRawSize(), 0, 0, group.GetGroupIndex());
     if (!result)
       return std::unexpected(result.error());
+    ++expected_group_index;
   }
   for (const NKitV1SequentialSpan& span : sequential.GetDiscSpansAfterPartition())
   {
@@ -129,7 +151,7 @@ NKitV1Result<void> NKitV1ReconstructedBlobReader::RevalidateSourceIdentity()
   return result;
 }
 
-NKitV1Result<const std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>*>
+NKitV1Result<const NKitV1ReconstructedBlobReader::CachedGroup*>
 NKitV1ReconstructedBlobReader::GetGroup(
     u64 group_index, const std::function<bool()>& cancellation_callback)
 {
@@ -139,7 +161,7 @@ NKitV1ReconstructedBlobReader::GetGroup(
   {
     found->last_used = m_cache_clock;
     ++m_cache_stats.hits;
-    return found->bytes.get();
+    return &*found;
   }
 
   ++m_cache_stats.misses;
@@ -156,12 +178,12 @@ NKitV1ReconstructedBlobReader::GetGroup(
   if (m_cache.size() == CACHE_GROUP_CAPACITY)
   {
     const auto victim = std::ranges::min_element(m_cache, {}, &CachedGroup::last_used);
-    *victim = CachedGroup{group_index, m_cache_clock, std::move(bytes)};
+    *victim = CachedGroup{group_index, *result, m_cache_clock, std::move(bytes)};
     ++m_cache_stats.evictions;
-    return victim->bytes.get();
+    return &*victim;
   }
-  m_cache.push_back(CachedGroup{group_index, m_cache_clock, std::move(bytes)});
-  return m_cache.back().bytes.get();
+  m_cache.push_back(CachedGroup{group_index, *result, m_cache_clock, std::move(bytes)});
+  return &m_cache.back();
 }
 
 NKitV1Result<void> NKitV1ReconstructedBlobReader::PrewarmGroup(
@@ -250,7 +272,9 @@ bool NKitV1ReconstructedBlobReader::Read(u64 offset, u64 size, u8* out_ptr)
       auto group = GetGroup(range->GetGroupIndex(), {});
       if (!group)
         return false;
-      std::memcpy(out_ptr, (*group)->data() + delta, static_cast<size_t>(count));
+      if (delta > (*group)->valid_size || count > (*group)->valid_size - delta)
+        return Fail(Error(NKitV1ErrorCode::InvalidReconstructionIndex, offset));
+      std::memcpy(out_ptr, (*group)->bytes->data() + delta, static_cast<size_t>(count));
       break;
     }
     }

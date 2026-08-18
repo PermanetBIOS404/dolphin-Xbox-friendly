@@ -129,6 +129,7 @@ private:
   struct CachedGroup
   {
     u64 group_index = 0;
+    u64 valid_size = 0;
     u64 last_used = 0;
     std::unique_ptr<std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>> bytes;
   };
@@ -137,7 +138,7 @@ private:
       std::unique_ptr<BlobReader> source,
       std::shared_ptr<const NKitV1ReconstructionIndex> index);
 
-  NKitV1Result<const std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>*>
+  NKitV1Result<const CachedGroup*>
   GetGroup(u64 group_index, const std::function<bool()>& cancellation_callback);
   bool Fail(NKitV1Error error);
 

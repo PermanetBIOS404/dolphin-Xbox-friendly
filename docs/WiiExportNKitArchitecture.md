@@ -1356,3 +1356,120 @@ final clusters while providing the correct conventional partition-size view, add
 synthetic 2,109-complete-group-plus-52-cluster shape without allocating retail-sized test data, and
 reassess Kirby read-only. It must not relax exceptional hash/scrub, additional-partition,
 compressed-outer, dual-layer, nested-directory, GameCube, NKit 2, or recovery-download boundaries.
+
+## 20. O2 retail compatibility: partial final groups and retail-scale indexing
+
+O2 is based exactly on O1 commit `d56ff1cecbb181505b90377f448a1f9c0d5b037c`. It
+generalizes the proven one-partition reader to a canonical partial final Wii hash group and removes
+the whole-compacted-partition planning allocation. The compatibility change is entirely
+format-driven; production code contains no title/ID-specific branch, and the one authorized retail
+source remained a read-only diagnostic input.
+
+### Canonical partial-group semantics
+
+The prior rejection occurred in `BuildWiiNKitV1SequentialReconstructionPlan`: group count used
+integer division by `VolumeWii::GROUP_TOTAL_SIZE`, raw partition size had to have zero remainder,
+and decrypted size had to equal that full-group count times `GROUP_DATA_SIZE`. Fixed 2 MiB
+assumptions then propagated through group materialization, sequential output, reconstruction-index
+ranges, and cache copies.
+
+Canonical NKit v1 behavior was rechecked at the pinned MIT reference commit
+`61dd683b4b70273a37c4513726b87943f2e32e37`. `NkitReaderWii` chooses
+`min(64, remaining / 0x7c00)` present blocks, clears unused slots in its 64-block group buffer, and
+writes only `present_blocks * 0x8000`. `WiiPartitionGroupEncryptionState` marks only those blocks
+used but calculates the full 64-slot hierarchy: unused blocks contribute 31 SHA-1 digests of a
+zero `0x400` data sector, H1 covers each eight-block H0 set, H2 covers the eight H1 sets, and H3 is
+SHA-1 of the complete H2 table. Encryption likewise operates over the zero-padded group, but only
+physically present encrypted clusters are emitted. Dolphin's existing `VolumeWii::HashGroup` and
+`EncryptGroup` already implement that hierarchy and AES/IV behavior when the missing decrypted
+slots are zero-filled, so O2 reuses them unchanged.
+
+`NKitV1PartitionGroupGeometry` now records group index, first cluster, present cluster count, exact
+raw/decrypted offsets, and exact raw/decrypted sizes. Geometry is derived from a cluster-aligned
+partition size. Every non-final descriptor must contain exactly 64 clusters; only the final
+descriptor may contain 1 through 63. The materializer clears its bounded 64-block working buffer,
+fills only the present decrypted range, hashes/encrypts the full canonical zero-padded hierarchy,
+compares the generated H3 with the retained entry, and returns the exact valid encrypted size.
+Sequential output, index ranges, and random reads expose only that returned size, so no fictional
+cluster is readable past the declared partition end.
+
+### Retail-scale plan, index, and cache
+
+The O1 planning ceiling was caused by reading `source_stored_size` into one vector capped at 16
+MiB, followed by eagerly materializing and hashing every partition group. O2 instead reads only the
+fixed `0x440` payload header, the bounded prefix through the FST, the compact hash-flag table, and
+one bounded encoded gap at a time. Regular file bodies remain source-backed spans regardless of
+file size, alignment padding is checked in fixed 64 KiB chunks, and the compact partition tail is
+decoded through bounded windows. The retained 0x18000-byte H3 table is checked against the TMD
+content digest once during planning; each group's data-to-H3 relationship is checked lazily when
+that group is requested. Thus factory cost is proportional to compact metadata/instructions and
+descriptor count, not reconstructed bytes or the complete compact payload.
+
+The immutable random-access index gives each final partial group its exact raw length and validates
+group order, cluster counts, first-cluster/raw/decrypted offsets, sizes, complete address-space
+coverage, and source bounds. Lookup remains binary search over sorted ranges. At Kirby-class
+geometry, 2,110 group descriptors consume 118,160 bytes (56 bytes each); the corresponding 2,114
+synthetic index ranges consume 101,472 bytes (48 bytes each). This is linear in group/range count,
+bounded by legal Wii/H3 geometry, and independent of the roughly 4.4 GiB partition size.
+
+The existing deterministic two-entry LRU cache remains capped at two full candidate buffers (4
+MiB resident). Each cached entry now records its valid byte count. A partial entry is keyed by the
+same logical group index, copies only within that valid size, and cannot expose zero-padding or
+stale bytes from another full entry. Full/partial hits, misses, repeated reads, and eviction are
+covered by the focused tests; `CopyReader` behavior is unchanged.
+
+### Synthetic proof
+
+The small oracle/independent-encoder fixture now supports two full groups plus a 52-cluster final
+group. Its exact final `52 * 0x8000` encrypted bytes match the independently generated conventional
+oracle, including H0/H1/H2/H3 and AES output. Boundary reads cover full-to-partial crossing, first
+and last final-group bytes, partition end, the following defined disc range, reverse/repeated cache
+access, and rejection of a nonexistent group. Normal DiscIO reports Wii, the invented ID, and
+`IsNKit() == false`; it validates the last present block and complete H3 table, reads all known
+files, and is accepted by unchanged `AnalyzeWbfs`. Unchanged `WriteWbfs` produces a temporary
+synthetic WBFS which reopens with the same files; existing writer cancellation and staging cleanup
+tests remain authoritative.
+
+A second fixture represents 2,109 complete groups plus a 52-cluster final group without a 4 GiB
+allocation or file. It stores about 20 MiB of invented compact data, including a source-backed file
+larger than the old 16 MiB whole-payload cap, then describes thousands of reconstructed zero groups
+with one gap and canonical repeated zero-group H3 entries. Planning performs no read larger than
+the fixed 0x50000 NKit header and less than 4 MiB of total source reads before group prewarming. It
+builds all 2,110 descriptors, reconstructs arbitrary middle/final groups into the bounded cache,
+opens through DiscIO, reads the known file prefix, and passes `AnalyzeWbfs`.
+
+Negative coverage rejects zero or non-cluster-aligned raw geometry, inconsistent inner sizes,
+truncated compact input, retained-H3/TMD mismatch, and mutated final-group payload. Non-final
+groups are full by construction and are revalidated by the index, while group counts exceeding
+the H3/legal Wii bound, arithmetic overflow, exceptional hash/scrub flags, and gameplay-critical
+recovery loss remain covered by the existing foundation/random-access matrix.
+
+### Kirby read-only reassessment and exact O3 boundary
+
+The authorized Kirby source still identifies as ID6 `RK5E01`, exact Wii `NKIT v01`, PLAIN,
+single-layer, one retained data partition, playable with a synthetic non-game region, and requiring
+external update data only for archival recovery. Its retained raw/decrypted sizes now validate as
+2,109 complete groups plus one 52-cluster final group, and its 3,705,667,584-byte compact source no
+longer hits the former 16 MiB planning limit.
+
+Factory construction now advances to the next independent generic boundary:
+`UnsupportedGapContext` at source offset `0x9a070c`. The compact FST begins at payload-relative
+`0x928700` (source `0x9a0700`), has 2,964 entries, and entry 1 is a directory named `bggimmick`
+with parent index 0 and subtree-end index 352. O2 deliberately retains N4's root-level-regular-file
+restriction, so no reconstructed reader, DiscIO conventional view, `AnalyzeWbfs` result, or Ready
+preview is produced for Kirby yet. No retail ISO/WBFS was written.
+
+O3 should implement validated nested-directory FST traversal and the corresponding canonical
+directory-aware file/gap ordering. It must preserve directory records while collecting and sorting
+only regular-file compact data, patch each file offset correctly, add synthetic nested/subtree and
+malformed-directory coverage, and then reassess Kirby read-only. Junk-file removal or any further
+exceptional context should remain a separate later construct unless it is inseparable from the
+canonical nested-directory behavior proven by that reassessment.
+
+### O2 validation checkpoint
+
+The isolated Ninja `RelWithDebInfo` configuration has tests and Qt enabled. O2 focused coverage is
+4/4; O1 is 7/7; N5 is 6/6; N4 is 8/8; N3 is 10/10; N2 is 43/43; the complete affected Wii Export
+family is 186/186; and representative Physical SD smoke is 3/3. The full Dolphin suite was not run
+because the bounded affected matrix was green. Both aggregate tests and the production
+`dolphin-emu` target are required to link with every build invocation limited to `-j2`.
