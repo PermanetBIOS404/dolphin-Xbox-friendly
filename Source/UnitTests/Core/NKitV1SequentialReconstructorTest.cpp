@@ -341,6 +341,55 @@ SyntheticConventionalWiiDisc BuildSyntheticConventionalWiiDisc()
   return disc;
 }
 
+enum class O5HashPolicyVariant
+{
+  RetainedH3,
+  RegeneratedH3,
+  RegeneratedH3AndTmdDigest,
+};
+
+SyntheticConventionalWiiDisc BuildO5HashPolicyVariant(
+    const SyntheticConventionalWiiDisc& original, O5HashPolicyVariant policy)
+{
+  SyntheticConventionalWiiDisc variant = original;
+  variant.stored_bytes = std::make_shared<std::vector<u8>>(*original.stored_bytes);
+
+  // Model compact-source information loss with one invented payload byte. The raw cluster hash
+  // areas are regenerated from that altered payload, independently of the retained H3/TMD.
+  constexpr u64 mutation_offset = 0x20000;
+  reinterpret_cast<u8*>(variant.decrypted_group.data())[mutation_offset] ^= 0x80;
+
+  std::array<u8, VolumeWii::GROUP_TOTAL_SIZE> encrypted{};
+  EXPECT_TRUE(VolumeWii::EncryptGroup(variant.decrypted_group.data(), variant.title_key,
+                                      &encrypted, {}, true));
+  std::copy(encrypted.begin(), encrypted.end(),
+            variant.stored_bytes->begin() + ORIGINAL_PARTITION_OFFSET + PARTITION_DATA_OFFSET);
+
+  if (policy == O5HashPolicyVariant::RetainedH3)
+    return variant;
+
+  std::array<VolumeWii::HashBlock, VolumeWii::BLOCKS_PER_GROUP> hashes{};
+  EXPECT_TRUE(VolumeWii::HashGroup(variant.decrypted_group.data(), hashes.data(), {}, true));
+  const Common::SHA1::Digest regenerated_h3 = Common::SHA1::CalculateDigest(hashes[0].h2);
+  std::copy(regenerated_h3.begin(), regenerated_h3.end(),
+            variant.stored_bytes->begin() + ORIGINAL_PARTITION_OFFSET + H3_OFFSET);
+
+  if (policy == O5HashPolicyVariant::RegeneratedH3AndTmdDigest)
+  {
+    const std::span<const u8> h3_table(
+        variant.stored_bytes->data() + ORIGINAL_PARTITION_OFFSET + H3_OFFSET,
+        WII_PARTITION_H3_SIZE);
+    const Common::SHA1::Digest tmd_content_digest =
+        Common::SHA1::CalculateDigest(h3_table.data(), h3_table.size());
+    const size_t tmd_content_hash = ORIGINAL_PARTITION_OFFSET + TMD_OFFSET +
+                                    sizeof(IOS::ES::TMDHeader) +
+                                    offsetof(IOS::ES::Content, sha1);
+    std::copy(tmd_content_digest.begin(), tmd_content_digest.end(),
+              variant.stored_bytes->begin() + tmd_content_hash);
+  }
+  return variant;
+}
+
 std::vector<u8> EncodeExplicitMixedGap(u64 gap_length, std::span<const u8> literal)
 {
   EXPECT_GE(gap_length, 0x300u);
@@ -1439,6 +1488,82 @@ TEST_F(NKitV1SequentialProofTest, HashHierarchyAndEncryptionMatchIndependentOrac
   VolumeWii::DecryptBlockData(raw, decrypted_data.data(), decrypt.get());
   EXPECT_EQ(decrypted_hashes.h0, hashes[0].h0);
   EXPECT_EQ(decrypted_data, s_conventional.decrypted_group[0]);
+}
+
+TEST(NKitV1O5Research, HashPolicyVariantsSeparateDiscIntegrityFromOrdinaryReads)
+{
+  const SyntheticConventionalWiiDisc original = BuildSyntheticConventionalWiiDisc();
+  const SyntheticConventionalWiiDisc retained_h3 =
+      BuildO5HashPolicyVariant(original, O5HashPolicyVariant::RetainedH3);
+  const SyntheticConventionalWiiDisc regenerated_h3 =
+      BuildO5HashPolicyVariant(original, O5HashPolicyVariant::RegeneratedH3);
+  const SyntheticConventionalWiiDisc regenerated_h3_and_tmd = BuildO5HashPolicyVariant(
+      original, O5HashPolicyVariant::RegeneratedH3AndTmdDigest);
+  constexpr u64 mutation_data_offset = 0x20000;
+  constexpr u64 mutated_block = mutation_data_offset / VolumeWii::BLOCK_DATA_SIZE;
+
+  const auto open_and_check_file = [](const SyntheticConventionalWiiDisc& disc) {
+    std::unique_ptr<VolumeDisc> volume = CreateDisc(disc.MakeReader());
+    EXPECT_NE(volume, nullptr);
+    if (!volume)
+      return volume;
+    const Partition partition = volume->GetGamePartition();
+    const FileSystem* file_system = volume->GetFileSystem(partition);
+    EXPECT_NE(file_system, nullptr);
+    if (!file_system)
+      return volume;
+    std::unique_ptr<FileInfo> file = file_system->FindFileInfo("proof.bin");
+    EXPECT_NE(file, nullptr);
+    if (!file)
+      return volume;
+    std::array<u8, KNOWN_FILE.size()> actual{};
+    EXPECT_TRUE(volume->Read(file->GetOffset(), file->GetSize(), actual.data(), partition));
+    EXPECT_EQ(actual, KNOWN_FILE);
+    return volume;
+  };
+
+  std::unique_ptr<VolumeDisc> original_volume = open_and_check_file(original);
+  std::unique_ptr<VolumeDisc> retained_volume = open_and_check_file(retained_h3);
+  std::unique_ptr<VolumeDisc> regenerated_volume = open_and_check_file(regenerated_h3);
+  std::unique_ptr<VolumeDisc> complete_volume = open_and_check_file(regenerated_h3_and_tmd);
+  ASSERT_NE(original_volume, nullptr);
+  ASSERT_NE(retained_volume, nullptr);
+  ASSERT_NE(regenerated_volume, nullptr);
+  ASSERT_NE(complete_volume, nullptr);
+
+  const u8* original_data = reinterpret_cast<const u8*>(original.decrypted_group.data());
+  const u8 original_byte = original_data[mutation_data_offset];
+  const auto expect_decrypted_read = [](VolumeDisc& volume, u64 offset, u8 expected) {
+    std::array<u8, 1> actual{};
+    EXPECT_TRUE(volume.Read(offset, actual.size(), actual.data(), volume.GetGamePartition()));
+    EXPECT_EQ(actual[0], expected);
+  };
+  expect_decrypted_read(*original_volume, mutation_data_offset, original_byte);
+  expect_decrypted_read(*retained_volume, mutation_data_offset, original_byte ^ 0x80);
+  expect_decrypted_read(*regenerated_volume, mutation_data_offset, original_byte ^ 0x80);
+  expect_decrypted_read(*complete_volume, mutation_data_offset, original_byte ^ 0x80);
+
+  const Partition original_partition = original_volume->GetGamePartition();
+  EXPECT_TRUE(original_volume->CheckBlockIntegrity(mutated_block, original_partition));
+  EXPECT_TRUE(original_volume->CheckH3TableIntegrity(original_partition));
+
+  const Partition retained_partition = retained_volume->GetGamePartition();
+  EXPECT_FALSE(retained_volume->CheckBlockIntegrity(mutated_block, retained_partition));
+  EXPECT_TRUE(retained_volume->CheckH3TableIntegrity(retained_partition));
+
+  const Partition regenerated_partition = regenerated_volume->GetGamePartition();
+  EXPECT_TRUE(regenerated_volume->CheckBlockIntegrity(mutated_block, regenerated_partition));
+  EXPECT_FALSE(regenerated_volume->CheckH3TableIntegrity(regenerated_partition));
+
+  const Partition complete_partition = complete_volume->GetGamePartition();
+  EXPECT_TRUE(complete_volume->CheckBlockIntegrity(mutated_block, complete_partition));
+  EXPECT_TRUE(complete_volume->CheckH3TableIntegrity(complete_partition));
+
+  const IOS::ES::TMDReader& original_tmd =
+      original_volume->GetTMD(original_volume->GetGamePartition());
+  const IOS::ES::TMDReader& complete_tmd = complete_volume->GetTMD(complete_partition);
+  EXPECT_NE(original_tmd.GetSha1(), complete_tmd.GetSha1());
+  EXPECT_EQ(original_tmd.GetSignatureData(), complete_tmd.GetSignatureData());
 }
 
 TEST_F(NKitV1SequentialProofTest, SequentialOutputMatchesByteOracleWithBoundedMemory)

@@ -1681,3 +1681,40 @@ N2 is 43/43. The complete affected NKit/Wii Export/WBFS matrix is 263/263, and r
 Physical SD smoke is 3/3. The full suite was not run because the bounded matrix was green. Both
 `tests` and `dolphin-emu` link successfully, every build invocation used `-j2`, and Kirby's
 before/after SHA-256, size, and nanosecond mtime match exactly.
+
+## 23. O5 hash-hierarchy recovery semantics research
+
+O5 maps Wii partition integrity as decrypted 0x400-byte data slices to H0, groups of eight H0
+tables to H1, groups of eight H1 tables to H2, and each 64-cluster H2 table to an H3 entry. The
+sole disc-partition TMD content record contains SHA-1 of the complete 0x18000-byte H3 table; the
+Nintendo RSA signature authenticates the TMD signed body containing that record. Data integrity,
+Nintendo authenticity, archival byte identity, and target playability are therefore separate
+properties.
+
+Dolphin's ordinary filesystem reads do not enforce the hierarchy. Its explicit integrity methods
+do, while emulated disc `DIVerify` deliberately skips TMD/ticket cryptographic verification for
+custom and patched games. USB Loader GX delegates partition open and reads to `/dev/di`. d2x
+supplies WBFS bytes to the IOS DIP path and explicitly patches ES signature checks. Source evidence
+therefore predicts that a fully regenerated H0-H3 hierarchy plus a matching TMD content digest is
+internally valid and compatible with Dolphin and common d2x, but not stock IOS. Real-hardware d2x
+playability remains an acceptance requirement.
+
+Pinned NKit v1 stores complete 0x400 cluster hash headers for flagged exceptional groups. Kirby
+group 2,109 has no such flag/data. Its retained H3 cannot be reversed into the discarded H2/lower
+hashes or unknown original payload, and image CRCs are not recovery data. Canonical ConvertToISO
+regenerates lower hashes but retains H3/TMD even when its internal validity result is false;
+RecoverToISO instead applies external recovery and reports unresolved H3 errors as corruption.
+Neither path repairs H3/TMD.
+
+The O5 synthetic policy matrix confirms that retained mismatching H3 fails block integrity,
+regenerated H3 with retained TMD fails H3-table integrity, and regenerated H3 plus the corresponding
+TMD digest passes both. Ordinary DiscIO file reads succeed for all three, demonstrating why those
+reads alone are insufficient evidence. Changing the digest changes the signed TMD payload while
+leaving the retail signature bytes unchanged.
+
+Production remains fail-closed: O5 adds no H3/TMD rewriting and does not suppress
+`HashHierarchyMismatch`. The recommended O6 is a narrowly scoped playable-WBFS policy that
+regenerates the complete integrity chain and TMD digest for USB Loader GX+d2x, truthfully records
+the loss of Nintendo authenticity/archival identity, and is not promoted until controlled real
+hardware accepts it. Detailed evidence, source references, experiments, and policy A-F analysis
+are in `docs/WiiNKitHashHierarchyResearch.md`.
