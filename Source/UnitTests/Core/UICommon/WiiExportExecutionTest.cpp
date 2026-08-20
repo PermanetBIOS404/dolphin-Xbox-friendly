@@ -29,6 +29,7 @@ using UICommon::WiiExportExecutionReason;
 using UICommon::WiiExportExecutionRequest;
 using UICommon::WiiExportExecutionResult;
 using UICommon::WiiExportExecutionStage;
+using UICommon::WiiExportNKitHashPolicy;
 using UICommon::WiiExportPlan;
 using UICommon::WiiExportPreflightBlocker;
 using UICommon::WiiExportPreflightReadiness;
@@ -322,6 +323,29 @@ TEST(WiiExportExecutionPreflight, CompatibleNKitBackendPasses)
 
   EXPECT_EQ(WiiExportPreflightReadiness::Ready, result.readiness);
   EXPECT_TRUE(result.source_blob_type_supported);
+}
+
+TEST(WiiExportExecutionPreflight, D2xPlayableRepairRequiresCapabilityAndCarriesWarning)
+{
+  WiiExportSource source = MakeSource(SMALL_OUTPUT_SIZE, DiscIO::BlobType::PLAIN);
+  source.nkit_hash_repair_required = true;
+  source.nkit_repaired_group_count = 2;
+  const WiiExportPlan plan = UICommon::CreateWiiExportPlan(
+      source, MakeDestination(), WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy);
+  ASSERT_TRUE(plan.succeeded);
+
+  const WiiExportPreflightResult compatible =
+      UICommon::PreflightWiiExport(plan, MakeCompatibleDescriptor(plan));
+  EXPECT_EQ(compatible.readiness, WiiExportPreflightReadiness::ReadyWithWarnings);
+  EXPECT_TRUE(UICommon::HasWiiExportPreflightWarning(
+      compatible, WiiExportPreflightWarning::D2xPlayableHashRepair));
+
+  WiiExportBackendDescriptor unsupported = MakeCompatibleDescriptor(plan);
+  unsupported.supported_capabilities[WiiExportBackendCapability::D2xPlayableHashRepair] = false;
+  const WiiExportPreflightResult blocked = UICommon::PreflightWiiExport(plan, unsupported);
+  EXPECT_EQ(blocked.readiness, WiiExportPreflightReadiness::Blocked);
+  EXPECT_TRUE(HasMissingCapability(blocked,
+                                   WiiExportBackendCapability::D2xPlayableHashRepair));
 }
 
 TEST(WiiExportExecutionPreflight, CompatibleSplitBackendPasses)
@@ -788,6 +812,27 @@ TEST(WiiExportExecution, DiagnosticTextIsCarriedUnchangedAsInertData)
 
   EXPECT_EQ(WiiExportExecutionOutcome::Failed, result.outcome);
   EXPECT_EQ(backend.result.diagnostic, result.backend_diagnostic);
+}
+
+TEST(WiiExportExecution, StructuredPlayableRepairResultIsPropagated)
+{
+  const WiiExportPlan plan = MakePlan();
+  const WiiExportBackendDescriptor descriptor = MakeCompatibleDescriptor(plan);
+  FakeWiiExportBackend backend(descriptor);
+  backend.result = MakeSuccessfulBackendResult(plan);
+  backend.result.playable_repair = {
+      .applied = true,
+      .repaired_group_count = 2,
+      .h3_table_regenerated = true,
+      .tmd_content_digest_regenerated = true,
+      .nintendo_authenticity_preserved = false,
+  };
+
+  const WiiExportExecutionResult result =
+      UICommon::ExecuteWiiExport(WiiExportExecutionRequest(plan, descriptor), backend);
+
+  ASSERT_EQ(result.outcome, WiiExportExecutionOutcome::Succeeded);
+  EXPECT_EQ(result.playable_repair, backend.result.playable_repair);
 }
 
 TEST(WiiExportExecution, ExpectedAndActualBackendIdentifierMismatchIsContractViolation)

@@ -232,6 +232,7 @@ TEST_F(WiiExportNativeBackendTest, DescriptorAdvertisesOnlyProvenNativeCapabilit
   EXPECT_TRUE(HasCapability(descriptor, WiiExportBackendCapability::WbfsOutput));
   EXPECT_TRUE(HasCapability(descriptor, WiiExportBackendCapability::SplitWbfsOutput));
   EXPECT_TRUE(HasCapability(descriptor, WiiExportBackendCapability::SourceContainerInput));
+  EXPECT_TRUE(HasCapability(descriptor, WiiExportBackendCapability::D2xPlayableHashRepair));
   EXPECT_FALSE(HasCapability(descriptor, WiiExportBackendCapability::NKitInput));
   EXPECT_EQ(descriptor.supported_source_blob_types,
             (std::vector{DiscIO::BlobType::PLAIN, DiscIO::BlobType::RVZ}));
@@ -287,6 +288,25 @@ TEST_F(WiiExportNativeBackendTest, MatchingRvzAnalysisAndPlanAreAccepted)
 
   EXPECT_EQ(result.outcome, WiiExportExecutionOutcome::Succeeded);
   EXPECT_EQ(test_backend.writer->invocation_count, 1);
+}
+
+TEST_F(WiiExportNativeBackendTest, D2xPlanRejectsConventionalStrictReaderBeforeWriting)
+{
+  PreparedSource plan_source = PrepareSource();
+  WiiExportPlan plan = MakePlan(plan_source, m_destination_root);
+  plan.nkit_hash_policy = WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy;
+  plan.nkit_repaired_group_count = 1;
+  plan.required_backend_capabilities[WiiExportBackendCapability::D2xPlayableHashRepair] = true;
+
+  TestBackend test_backend = MakeTestBackend(std::move(plan_source));
+  const WiiExportExecutionResult result =
+      ExecuteWiiExport(WiiExportExecutionRequest(plan, test_backend.backend->GetDescriptor()),
+                       *test_backend.backend);
+
+  EXPECT_EQ(result.outcome, WiiExportExecutionOutcome::Failed);
+  EXPECT_EQ(test_backend.writer->invocation_count, 0);
+  EXPECT_NE(result.backend_diagnostic.find("repaired reader"), std::string::npos);
+  EXPECT_FALSE(File::Exists(m_destination_root + "/wbfs"));
 }
 
 TEST_F(WiiExportNativeBackendTest, AnalysisSizeAndSourceMismatchesRejectBeforeWriterInvocation)

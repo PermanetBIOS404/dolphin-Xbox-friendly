@@ -208,6 +208,46 @@ TEST(WiiExportPreviewModelTest, SplitPolicyChangesRecalculateWithoutReanalysis)
   EXPECT_EQ(model.GetPreparedSource().analysis.get(), analysis.get());
 }
 
+TEST(WiiExportPreviewModelTest, D2xPlayableRepairIsBlockedUntilExplicitlySelected)
+{
+  const auto analysis = MakeAnalysis();
+  ASSERT_TRUE(analysis && analysis->IsSuccessful());
+  WiiExportPreparedSource prepared = MakePreparedSource(analysis);
+  prepared.source.nkit_hash_repair_required = true;
+  prepared.source.nkit_repaired_group_count = 2;
+  WiiExportPreviewModel model(std::move(prepared), NoCollisions);
+  ASSERT_TRUE(model.SelectDestination(MakeDestination()));
+
+  EXPECT_EQ(model.GetState().readiness, WiiExportPreviewReadiness::Blocked);
+  EXPECT_EQ(model.GetState().nkit_hash_policy,
+            WiiExportNKitHashPolicy::StrictOriginalHierarchy);
+  EXPECT_TRUE(HasWiiExportPlanError(
+      model.GetState().plan, WiiExportPlanError::D2xPlayableHashRepairRequired));
+
+  model.SetNKitHashPolicy(WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy);
+  EXPECT_EQ(model.GetState().readiness, WiiExportPreviewReadiness::ReadyWithWarnings);
+  EXPECT_EQ(model.GetState().nkit_hash_policy,
+            WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy);
+  EXPECT_EQ(model.GetState().plan.nkit_repaired_group_count, 2u);
+  EXPECT_TRUE(HasWiiExportPreflightWarning(
+      model.GetState().preflight, WiiExportPreflightWarning::D2xPlayableHashRepair));
+}
+
+TEST(WiiExportPreviewModelTest, OrdinarySourceCannotSelectD2xRepair)
+{
+  const auto analysis = MakeAnalysis();
+  ASSERT_TRUE(analysis && analysis->IsSuccessful());
+  WiiExportPreviewModel model(MakePreparedSource(analysis), NoCollisions);
+  ASSERT_TRUE(model.SelectDestination(MakeDestination()));
+
+  model.SetNKitHashPolicy(WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy);
+  EXPECT_EQ(model.GetState().nkit_hash_policy,
+            WiiExportNKitHashPolicy::StrictOriginalHierarchy);
+  EXPECT_EQ(model.GetState().readiness, WiiExportPreviewReadiness::Ready);
+  EXPECT_FALSE(HasWiiExportPreflightWarning(
+      model.GetState().preflight, WiiExportPreflightWarning::D2xPlayableHashRepair));
+}
+
 TEST(WiiExportPreviewModelTest, UnknownFilesystemBlocksLargeAutomaticPlan)
 {
   const auto analysis = MakeAnalysis(WII_EXPORT_WBFS_SPLIT_SIZE);

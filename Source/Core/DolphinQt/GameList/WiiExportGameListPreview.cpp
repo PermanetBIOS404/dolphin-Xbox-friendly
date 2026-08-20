@@ -106,8 +106,18 @@ Common::SHA1::Digest CalculateReconstructionRecipeFingerprint(
   const DiscIO::NKitV1ReconstructionIndex& index = reader.GetIndex();
   const DiscIO::NKitV1SequentialReconstructionPlan& plan = index.GetPlan();
   const DiscIO::NKitV1SequentialPartition& partition = plan.GetPartition();
+  const DiscIO::NKitV1HashHierarchyRepairPlan& repair_plan =
+      reader.GetHashHierarchyRepairPlan();
   context->Update(plan.GetReconstructedDiscHeader());
-  context->Update(partition.GetReconstructedHeader());
+  context->Update(repair_plan.GetEffectivePartitionHeader());
+  HashValue(context.get(), repair_plan.GetPolicy());
+  HashValue(context.get(), repair_plan.GetNintendoAuthenticity());
+  for (const DiscIO::NKitV1HashHierarchyRepair& repair : repair_plan.GetRepairs())
+  {
+    HashValue(context.get(), repair.GetGroupIndex());
+    context->Update(repair.GetOriginalH3());
+    context->Update(repair.GetRegeneratedH3());
+  }
   for (const DiscIO::NKitV1ReconstructedRange& range : index.GetRanges())
   {
     HashValue(context.get(), range.GetKind());
@@ -162,10 +172,18 @@ UICommon::WiiExportNKitV1SourceRecipe MakeNKitRecipe(
   recipe.requires_external_archival_recovery =
       plan.GetFoundationPlan().GetRecoveryAssessment().GetArchivalAssessment() ==
       DiscIO::NKitV1ArchivalAssessment::ExternalUpdateRecoveryRequired;
+  const DiscIO::NKitV1HashHierarchyRepairPlan& repair_plan =
+      reader.GetHashHierarchyRepairPlan();
+  recipe.requires_d2x_playable_hash_repair = repair_plan.HasRepairs();
+  recipe.repaired_group_count = repair_plan.GetRepairs().size();
   recipe.compact_header_fingerprint =
       plan.GetFoundationPlan().GetSourceHeaderFingerprint();
   recipe.reconstruction_recipe_fingerprint =
       CalculateReconstructionRecipeFingerprint(reader);
+  recipe.original_h3_table_digest = repair_plan.GetOriginalH3TableDigest();
+  recipe.repaired_h3_table_digest = repair_plan.GetRepairedH3TableDigest();
+  recipe.original_tmd_content_digest = repair_plan.GetOriginalTmdContentDigest();
+  recipe.repaired_tmd_content_digest = repair_plan.GetRepairedTmdContentDigest();
   return recipe;
 }
 
@@ -244,6 +262,7 @@ WiiExportGameListSourcePreparation PrepareWiiExportGameListSource(
   }
 
   UICommon::WiiExportSourceRecipe recipe;
+  std::unique_ptr<DiscIO::NKitV1ReconstructedBlobReader> prepared_reader;
   if (volume->IsNKit())
   {
     std::unique_ptr<DiscIO::BlobReader> compact_reader =
@@ -265,7 +284,6 @@ WiiExportGameListSourcePreparation PrepareWiiExportGameListSource(
     }
 
     recipe.kind = UICommon::WiiExportSourceRecipeKind::ReconstructedNKitV1;
-    recipe.nkit_v1 = MakeNKitRecipe(**reconstructed);
     volume = DiscIO::CreateDisc((*reconstructed)->CopyReader());
     if (!volume || volume->GetVolumeType() != DiscIO::Platform::WiiDisc || volume->IsNKit())
     {
@@ -279,9 +297,63 @@ WiiExportGameListSourcePreparation PrepareWiiExportGameListSource(
       result.nkit_support = WiiExportNKitV1Support::SourceChanged;
       return result;
     }
-    result.nkit_support = WiiExportNKitV1Support::Supported;
+    const DiscIO::WbfsAnalysis strict_analysis = DiscIO::AnalyzeWbfs(*volume);
+    if (!strict_analysis.IsSuccessful())
+    {
+      result.error = WiiExportGameListPreparationError::AnalysisFailed;
+      result.analysis_error = strict_analysis.GetError();
+      return result;
+    }
+
+    const DiscIO::NKitV1WbfsReadValidationResult strict_validation =
+        DiscIO::ValidateWiiNKitV1WbfsSourceReads(**reconstructed, strict_analysis,
+                                                 cancellation_query);
+    if (strict_validation)
+    {
+      recipe.nkit_v1 = MakeNKitRecipe(**reconstructed);
+      prepared_reader = std::move(*reconstructed);
+      result.nkit_support = WiiExportNKitV1Support::Supported;
+    }
+    else if (strict_validation.error().error.code ==
+             DiscIO::NKitV1ErrorCode::HashHierarchyMismatch)
+    {
+      auto repaired = DiscIO::PrepareWiiNKitV1D2xPlayableRepairedReader(
+          std::move(*reconstructed), strict_analysis, cancellation_query);
+      if (!repaired)
+      {
+        result.nkit_support = ClassifyNKitError(repaired.error().code);
+        result.error = GetPreparationError(result.nkit_support);
+        return result;
+      }
+
+      volume = DiscIO::CreateDisc((*repaired)->CopyReader());
+      if (!volume || volume->GetVolumeType() != DiscIO::Platform::WiiDisc || volume->IsNKit())
+      {
+        result.error = WiiExportGameListPreparationError::NKitUnsupported;
+        result.nkit_support = WiiExportNKitV1Support::ReconstructionFailed;
+        return result;
+      }
+      const DiscIO::WbfsAnalysis repaired_analysis = DiscIO::AnalyzeWbfs(*volume);
+      if (!repaired_analysis.IsSuccessful())
+      {
+        result.error = WiiExportGameListPreparationError::AnalysisFailed;
+        result.analysis_error = repaired_analysis.GetError();
+        return result;
+      }
+      recipe.nkit_v1 = MakeNKitRecipe(**repaired);
+      result.nkit_support = WiiExportNKitV1Support::SupportedWithD2xPlayableRepair;
+      prepared_reader = std::move(*repaired);
+    }
+    else
+    {
+      result.nkit_support = ClassifyNKitError(strict_validation.error().error.code);
+      result.error = GetPreparationError(result.nkit_support);
+      return result;
+    }
   }
 
+  if (prepared_reader)
+    volume = DiscIO::CreateDisc(prepared_reader->CopyReader());
   auto analysis = std::make_shared<const DiscIO::WbfsAnalysis>(DiscIO::AnalyzeWbfs(*volume));
   if (!analysis->IsSuccessful())
   {
@@ -301,6 +373,10 @@ WiiExportGameListSourcePreparation PrepareWiiExportGameListSource(
   prepared.source.is_nkit = false;
   prepared.source.requires_external_archival_recovery =
       recipe.nkit_v1 && recipe.nkit_v1->requires_external_archival_recovery;
+  prepared.source.nkit_hash_repair_required =
+      recipe.nkit_v1 && recipe.nkit_v1->requires_d2x_playable_hash_repair;
+  prepared.source.nkit_repaired_group_count =
+      recipe.nkit_v1 ? recipe.nkit_v1->repaired_group_count : 0;
   prepared.source.expected_wbfs_size_bytes = analysis->GetExpectedOutputSize();
   prepared.analysis = std::move(analysis);
   prepared.recipe = std::move(recipe);
@@ -312,7 +388,8 @@ WiiExportGameListSourcePreparation PrepareWiiExportGameListSource(
 
 WiiExportPreparedReaderCreation CreateWiiExportPreparedSourceReader(
     const UICommon::WiiExportPreparedSource& prepared_source, WiiExportBlobLoader blob_loader,
-    WiiExportCancellationQuery cancellation_query)
+    WiiExportCancellationQuery cancellation_query,
+    UICommon::WiiExportNKitHashPolicy nkit_hash_policy)
 {
   WiiExportPreparedReaderCreation result;
   if (!prepared_source.analysis || !prepared_source.analysis->IsSuccessful())
@@ -331,6 +408,23 @@ WiiExportPreparedReaderCreation CreateWiiExportPreparedSourceReader(
 
   if (prepared_source.recipe.kind == UICommon::WiiExportSourceRecipeKind::DirectDisc)
   {
+    std::unique_ptr<DiscIO::VolumeDisc> volume = DiscIO::CreateDisc(source->CopyReader());
+    if (!volume || volume->GetVolumeType() != DiscIO::Platform::WiiDisc ||
+        volume->GetGameID() != prepared_source.source.game_id)
+    {
+      result.error = WiiExportGameListPreparationError::SourceIdentityChanged;
+      result.nkit_support = WiiExportNKitV1Support::SourceChanged;
+      return result;
+    }
+    const DiscIO::WbfsAnalysis analysis = DiscIO::AnalyzeWbfs(*volume);
+    if (!analysis.IsSuccessful() ||
+        analysis.GetSourceFingerprint() != prepared_source.analysis->GetSourceFingerprint() ||
+        analysis.GetExpectedOutputSize() != prepared_source.source.expected_wbfs_size_bytes)
+    {
+      result.error = WiiExportGameListPreparationError::SourceIdentityChanged;
+      result.nkit_support = WiiExportNKitV1Support::SourceChanged;
+      return result;
+    }
     result.error = WiiExportGameListPreparationError::None;
     result.reader = std::move(source);
     return result;
@@ -350,14 +444,6 @@ WiiExportPreparedReaderCreation CreateWiiExportPreparedSourceReader(
     result.error = GetPreparationError(result.nkit_support);
     return result;
   }
-  result.nkit_support = WiiExportNKitV1Support::Supported;
-  if (MakeNKitRecipe(**reconstructed) != *prepared_source.recipe.nkit_v1)
-  {
-    result.error = WiiExportGameListPreparationError::SourceIdentityChanged;
-    result.nkit_support = WiiExportNKitV1Support::SourceChanged;
-    return result;
-  }
-
   std::unique_ptr<DiscIO::VolumeDisc> volume =
       DiscIO::CreateDisc((*reconstructed)->CopyReader());
   if (!volume || volume->IsNKit() || volume->GetGameID() != prepared_source.source.game_id)
@@ -366,10 +452,80 @@ WiiExportPreparedReaderCreation CreateWiiExportPreparedSourceReader(
     result.nkit_support = WiiExportNKitV1Support::SourceChanged;
     return result;
   }
-  const DiscIO::WbfsAnalysis current_analysis = DiscIO::AnalyzeWbfs(*volume);
-  if (!current_analysis.IsSuccessful() ||
-      current_analysis.GetSourceFingerprint() !=
-          prepared_source.analysis->GetSourceFingerprint())
+  const DiscIO::WbfsAnalysis strict_analysis = DiscIO::AnalyzeWbfs(*volume);
+  if (!strict_analysis.IsSuccessful())
+  {
+    result.error = WiiExportGameListPreparationError::SourceIdentityChanged;
+    result.nkit_support = WiiExportNKitV1Support::SourceChanged;
+    return result;
+  }
+
+  const DiscIO::NKitV1WbfsReadValidationResult strict_validation =
+      DiscIO::ValidateWiiNKitV1WbfsSourceReads(**reconstructed, strict_analysis,
+                                               cancellation_query);
+  std::unique_ptr<DiscIO::NKitV1ReconstructedBlobReader> selected_reader;
+  if (strict_validation)
+  {
+    if (nkit_hash_policy == UICommon::WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy)
+    {
+      result.error = WiiExportGameListPreparationError::SourceIdentityChanged;
+      result.nkit_support = WiiExportNKitV1Support::SourceChanged;
+      return result;
+    }
+    selected_reader = std::move(*reconstructed);
+    result.nkit_support = WiiExportNKitV1Support::Supported;
+  }
+  else if (strict_validation.error().error.code ==
+           DiscIO::NKitV1ErrorCode::HashHierarchyMismatch)
+  {
+    if (nkit_hash_policy == UICommon::WiiExportNKitHashPolicy::StrictOriginalHierarchy)
+    {
+      result.error = WiiExportGameListPreparationError::NKitUnsupported;
+      result.nkit_support = WiiExportNKitV1Support::ExceptionalHashOrScrub;
+      return result;
+    }
+    auto repaired = DiscIO::PrepareWiiNKitV1D2xPlayableRepairedReader(
+        std::move(*reconstructed), strict_analysis, cancellation_query);
+    if (!repaired)
+    {
+      result.nkit_support = ClassifyNKitError(repaired.error().code);
+      result.error = GetPreparationError(result.nkit_support);
+      return result;
+    }
+    selected_reader = std::move(*repaired);
+    result.nkit_support = WiiExportNKitV1Support::SupportedWithD2xPlayableRepair;
+  }
+  else
+  {
+    result.nkit_support = ClassifyNKitError(strict_validation.error().error.code);
+    result.error = GetPreparationError(result.nkit_support);
+    return result;
+  }
+
+  volume = DiscIO::CreateDisc(selected_reader->CopyReader());
+  if (!volume || volume->GetVolumeType() != DiscIO::Platform::WiiDisc || volume->IsNKit() ||
+      volume->GetGameID() != prepared_source.source.game_id)
+  {
+    result.error = WiiExportGameListPreparationError::SourceIdentityChanged;
+    result.nkit_support = WiiExportNKitV1Support::SourceChanged;
+    return result;
+  }
+  const DiscIO::WbfsAnalysis selected_analysis = DiscIO::AnalyzeWbfs(*volume);
+  if (!selected_analysis.IsSuccessful() ||
+      selected_analysis.GetSourceFingerprint() != prepared_source.analysis->GetSourceFingerprint() ||
+      selected_analysis.GetExpectedOutputSize() != prepared_source.source.expected_wbfs_size_bytes)
+  {
+    result.error = WiiExportGameListPreparationError::SourceIdentityChanged;
+    result.nkit_support = WiiExportNKitV1Support::SourceChanged;
+    return result;
+  }
+
+  const UICommon::WiiExportNKitV1SourceRecipe current_recipe =
+      MakeNKitRecipe(*selected_reader);
+  if (!prepared_source.recipe.nkit_v1 || current_recipe != *prepared_source.recipe.nkit_v1 ||
+      current_recipe.requires_d2x_playable_hash_repair !=
+          prepared_source.source.nkit_hash_repair_required ||
+      current_recipe.repaired_group_count != prepared_source.source.nkit_repaired_group_count)
   {
     result.error = WiiExportGameListPreparationError::SourceIdentityChanged;
     result.nkit_support = WiiExportNKitV1Support::SourceChanged;
@@ -377,7 +533,7 @@ WiiExportPreparedReaderCreation CreateWiiExportPreparedSourceReader(
   }
 
   result.error = WiiExportGameListPreparationError::None;
-  result.reader = std::move(*reconstructed);
+  result.reader = std::move(selected_reader);
   return result;
 }
 

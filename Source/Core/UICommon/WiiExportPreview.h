@@ -33,8 +33,14 @@ struct WiiExportNKitV1SourceRecipe final
   u64 reconstructed_size = 0;
   u64 partition_group_count = 0;
   bool requires_external_archival_recovery = false;
+  bool requires_d2x_playable_hash_repair = false;
+  u64 repaired_group_count = 0;
   Common::SHA1::Digest compact_header_fingerprint{};
   Common::SHA1::Digest reconstruction_recipe_fingerprint{};
+  Common::SHA1::Digest original_h3_table_digest{};
+  Common::SHA1::Digest repaired_h3_table_digest{};
+  Common::SHA1::Digest original_tmd_content_digest{};
+  Common::SHA1::Digest repaired_tmd_content_digest{};
 
   constexpr bool operator==(const WiiExportNKitV1SourceRecipe&) const = default;
 };
@@ -120,6 +126,8 @@ struct WiiExportPreviewState final
 {
   WiiExportPreviewReadiness readiness = WiiExportPreviewReadiness::Blocked;
   WiiExportSplitPolicy split_policy = WiiExportSplitPolicy::Automatic;
+  WiiExportNKitHashPolicy nkit_hash_policy =
+      WiiExportNKitHashPolicy::StrictOriginalHierarchy;
   std::optional<WiiExportDestinationInspection> destination;
   WiiExportPlan plan;
   WiiExportPreflightResult preflight;
@@ -141,6 +149,7 @@ public:
   // A disengaged selection represents a cancelled chooser and deliberately changes nothing.
   bool SelectDestination(std::optional<WiiExportDestinationInspection> destination);
   void SetSplitPolicy(WiiExportSplitPolicy split_policy);
+  void SetNKitHashPolicy(WiiExportNKitHashPolicy nkit_hash_policy);
 
 private:
   void Recalculate();

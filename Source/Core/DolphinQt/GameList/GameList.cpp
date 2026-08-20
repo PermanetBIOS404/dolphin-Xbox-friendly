@@ -154,6 +154,10 @@ QString GetWiiExportPreparationErrorMessage(
     case DolphinQt::WiiExportNKitV1Support::ReconstructionFailed:
       return GameList::tr(
           "The NKit reconstruction source could not be prepared safely for export.");
+    case DolphinQt::WiiExportNKitV1Support::SupportedWithD2xPlayableRepair:
+      return GameList::tr(
+          "This NKit source requires the explicit playable repair option for USB Loader GX + "
+          "d2x cIOS.");
     }
     break;
   case Error::AnalysisFailed:
@@ -963,11 +967,30 @@ void GameList::RunWiiExport(const DolphinQt::WiiExportGameListExecutionRequest& 
     QStringList output_paths;
     for (const std::string& relative_path : result.execution->final_relative_paths)
       output_paths.append(destination.filePath(QString::fromStdString(relative_path)));
-    ModalMessageBox::information(
-        this, tr("Wii Export Assistant"),
-        tr("Export complete.\n\n%1\n%2\n\nOutput:\n%3")
-            .arg(title, QString::fromStdString(request.entry.game_id),
-                 output_paths.join(QLatin1Char('\n'))));
+    QString message;
+    if (result.execution->playable_repair.applied)
+    {
+      message = tr("Export completed successfully.\n\n"
+                   "Playable d2x repair applied.\n"
+                   "The Wii partition hash hierarchy and TMD content digest were regenerated.\n\n"
+                   "This output is intended for USB Loader GX + d2x cIOS.\n"
+                   "Nintendo-original signature authenticity is not preserved.");
+      if (result.execution->playable_repair.repaired_group_count != 0)
+      {
+        message += tr("\nRepaired groups: %1.")
+                       .arg(result.execution->playable_repair.repaired_group_count);
+      }
+      message += tr("\n\n%1\n%2\n\nOutput:\n%3")
+                     .arg(title, QString::fromStdString(request.entry.game_id),
+                          output_paths.join(QLatin1Char('\n')));
+    }
+    else
+    {
+      message = tr("Export complete.\n\n%1\n%2\n\nOutput:\n%3")
+                    .arg(title, QString::fromStdString(request.entry.game_id),
+                         output_paths.join(QLatin1Char('\n')));
+    }
+    ModalMessageBox::information(this, tr("Wii Export Assistant"), message);
     return;
   }
   case UICommon::WiiExportExecutionOutcome::Cancelled:

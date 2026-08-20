@@ -250,6 +250,16 @@ struct NKitV1SequentialReconstructionResult final
   u64 groups_reconstructed = 0;
 };
 
+// Bounded preparation result for one conventional Wii partition group. This deliberately exposes
+// the canonical regenerated H3 without deciding whether it is allowed to replace the retained H3.
+// Production callers must still apply either the strict retained-hierarchy policy or an immutable
+// d2x playable-repair plan before exposing the encrypted bytes.
+struct NKitV1PartitionGroupInspection final
+{
+  u64 raw_size = 0;
+  Common::SHA1::Digest regenerated_h3{};
+};
+
 // The O3 production subset supports one normal-hash data partition, any number of complete raw
 // 64-cluster groups followed by an optional 1..63-cluster final group, validated nested-directory
 // FSTs, canonical leading-null gap context, no exceptional preserved hashes, and either a
@@ -270,6 +280,22 @@ ValidateWiiNKitV1SequentialSource(BlobReader& source,
 // The returned size is therefore 2 MiB for complete groups and smaller for a final partial group.
 NKitV1Result<u64> ReconstructWiiNKitV1PartitionGroup(
     BlobReader& source, const NKitV1SequentialReconstructionPlan& plan, u64 group_index,
+    std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>* encrypted,
+    const std::function<bool()>& cancellation_callback = {});
+
+// Materializes, hashes, and encrypts one group while returning its canonical regenerated H3. It
+// performs every operation used by normal group reconstruction except comparison with retained
+// H3. This is restricted to bounded preflight that constructs an immutable repair plan.
+NKitV1Result<NKitV1PartitionGroupInspection> InspectWiiNKitV1PartitionGroup(
+    BlobReader& source, const NKitV1SequentialReconstructionPlan& plan, u64 group_index,
+    std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>* encrypted,
+    const std::function<bool()>& cancellation_callback = {});
+
+// Materializes a group only when its canonical regenerated H3 equals the immutable digest supplied
+// by a previously completed repair plan. This does not make arbitrary mismatches non-fatal.
+NKitV1Result<u64> ReconstructWiiNKitV1PartitionGroupWithExpectedH3(
+    BlobReader& source, const NKitV1SequentialReconstructionPlan& plan, u64 group_index,
+    const Common::SHA1::Digest& expected_h3,
     std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>* encrypted,
     const std::function<bool()>& cancellation_callback = {});
 

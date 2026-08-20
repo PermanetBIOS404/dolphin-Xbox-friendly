@@ -12,6 +12,7 @@
 
 #include <QApplication>
 #include <QByteArray>
+#include <QCheckBox>
 #include <QDir>
 #include <QFile>
 #include <QLabel>
@@ -97,7 +98,8 @@ private:
 };
 
 UICommon::WiiExportPreparedSource MakePreparedSource(bool nkit = false,
-                                                     bool reconstructed_nkit = false)
+                                                      bool reconstructed_nkit = false,
+                                                      bool d2x_repair_required = false)
 {
   GeneratedWiiReader reader;
   std::unique_ptr<DiscIO::VolumeDisc> volume = DiscIO::CreateDisc(reader.CopyReader());
@@ -113,12 +115,16 @@ UICommon::WiiExportPreparedSource MakePreparedSource(bool nkit = false,
   prepared.source.source_path = "/synthetic/qt-preview.iso";
   prepared.source.blob_type = DiscIO::BlobType::PLAIN;
   prepared.source.is_nkit = nkit;
+  prepared.source.nkit_hash_repair_required = d2x_repair_required;
+  prepared.source.nkit_repaired_group_count = d2x_repair_required ? 2 : 0;
   prepared.source.expected_wbfs_size_bytes = analysis->GetExpectedOutputSize();
   prepared.analysis = std::move(analysis);
   if (reconstructed_nkit)
   {
     prepared.recipe.kind = UICommon::WiiExportSourceRecipeKind::ReconstructedNKitV1;
     prepared.recipe.nkit_v1.emplace();
+    prepared.recipe.nkit_v1->requires_d2x_playable_hash_repair = d2x_repair_required;
+    prepared.recipe.nkit_v1->repaired_group_count = d2x_repair_required ? 2 : 0;
   }
   return prepared;
 }
@@ -406,6 +412,65 @@ TEST(WiiExportPreviewQtTest, SupportedNKitRecipeHasConcisePlayableReconstruction
   EXPECT_TRUE(messages->text().contains(QStringLiteral("playable WBFS")));
   EXPECT_TRUE(messages->text().contains(QStringLiteral("archival-perfect")));
   EXPECT_TRUE(export_button->isEnabled());
+}
+
+TEST(WiiExportPreviewQtTest, D2xRepairRequiresExplicitSelectionAndCanBeReset)
+{
+  GetTestApplication();
+  QTemporaryDir directory;
+  ASSERT_TRUE(directory.isValid());
+  WiiExportPreviewDialog dialog(MakePreparedSource(false, true, true));
+  auto* const repair = dialog.findChild<QCheckBox*>(QStringLiteral("wiiExportD2xRepair"));
+  auto* const explanation =
+      dialog.findChild<QLabel*>(QStringLiteral("wiiExportD2xExplanation"));
+  auto* const export_button =
+      dialog.findChild<QPushButton*>(QStringLiteral("wiiExportButton"));
+  ASSERT_NE(repair, nullptr);
+  ASSERT_NE(explanation, nullptr);
+  ASSERT_NE(export_button, nullptr);
+  EXPECT_FALSE(repair->isHidden());
+  EXPECT_FALSE(repair->isChecked());
+  EXPECT_EQ(dialog.GetPreviewState().nkit_hash_policy,
+            UICommon::WiiExportNKitHashPolicy::StrictOriginalHierarchy);
+
+  ASSERT_TRUE(dialog.SelectDestinationPath(directory.path()));
+  EXPECT_EQ(dialog.GetPreviewState().readiness,
+            UICommon::WiiExportPreviewReadiness::Blocked);
+  EXPECT_FALSE(export_button->isEnabled());
+  EXPECT_TRUE(dialog.findChild<QLabel*>(QStringLiteral("wiiExportMessages"))
+                  ->text()
+                  .contains(QStringLiteral("cannot be reproduced")));
+  EXPECT_TRUE(explanation->text().contains(QStringLiteral("TMD content digest")));
+
+  repair->click();
+  EXPECT_EQ(dialog.GetPreviewState().nkit_hash_policy,
+            UICommon::WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy);
+  EXPECT_EQ(dialog.GetPreviewState().readiness,
+            UICommon::WiiExportPreviewReadiness::ReadyWithWarnings);
+  EXPECT_TRUE(export_button->isEnabled());
+
+  repair->click();
+  EXPECT_EQ(dialog.GetPreviewState().nkit_hash_policy,
+            UICommon::WiiExportNKitHashPolicy::StrictOriginalHierarchy);
+  EXPECT_EQ(dialog.GetPreviewState().readiness,
+            UICommon::WiiExportPreviewReadiness::Blocked);
+  EXPECT_FALSE(export_button->isEnabled());
+}
+
+TEST(WiiExportPreviewQtTest, OrdinaryNKitAndNonNKitSourcesHideD2xRepairControl)
+{
+  GetTestApplication();
+  for (const bool reconstructed_nkit : {false, true})
+  {
+    WiiExportPreviewDialog dialog(MakePreparedSource(false, reconstructed_nkit));
+    auto* const repair = dialog.findChild<QCheckBox*>(QStringLiteral("wiiExportD2xRepair"));
+    ASSERT_NE(repair, nullptr);
+    EXPECT_TRUE(repair->isHidden());
+    EXPECT_EQ(dialog.GetPreviewState().nkit_hash_policy,
+              UICommon::WiiExportNKitHashPolicy::StrictOriginalHierarchy);
+  }
+  WiiExportPreviewDialog iso(MakePreparedSource());
+  EXPECT_TRUE(iso.findChild<QCheckBox*>(QStringLiteral("wiiExportD2xRepair"))->isHidden());
 }
 
 }  // namespace

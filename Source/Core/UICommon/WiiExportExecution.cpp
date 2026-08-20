@@ -13,11 +13,12 @@ namespace UICommon
 {
 namespace
 {
-constexpr std::array<WiiExportBackendCapability, 4> ALL_BACKEND_CAPABILITIES = {
+constexpr std::array<WiiExportBackendCapability, 5> ALL_BACKEND_CAPABILITIES = {
     WiiExportBackendCapability::WbfsOutput,
     WiiExportBackendCapability::SplitWbfsOutput,
     WiiExportBackendCapability::SourceContainerInput,
     WiiExportBackendCapability::NKitInput,
+    WiiExportBackendCapability::D2xPlayableHashRepair,
 };
 
 template <typename T>
@@ -171,6 +172,12 @@ WiiExportPreflightResult PreflightWiiExport(const WiiExportPlan& plan,
   else if (result.free_space == WiiExportFreeSpaceAssessment::Unknown)
     AddUnique(&result.warnings, WiiExportPreflightWarning::UnknownAvailableSpace);
 
+  if (plan.nkit_hash_policy ==
+      WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy)
+  {
+    AddUnique(&result.warnings, WiiExportPreflightWarning::D2xPlayableHashRepair);
+  }
+
   if (!result.blockers.empty())
     result.readiness = WiiExportPreflightReadiness::Blocked;
   else if (!result.warnings.empty())
@@ -302,6 +309,7 @@ WiiExportExecutionResult ExecuteWiiExport(
   result.final_relative_paths = std::move(backend_result.final_relative_paths);
   result.final_output_bytes = backend_result.final_output_bytes;
   result.backend_diagnostic = std::move(backend_result.diagnostic);
+  result.playable_repair = backend_result.playable_repair;
 
   if (progress_contract_violated)
   {

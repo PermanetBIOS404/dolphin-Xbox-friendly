@@ -1179,7 +1179,7 @@ ValidateWiiNKitV1SequentialSource(BlobReader& source,
   return ValidateSource(source, plan);
 }
 
-NKitV1Result<u64> ReconstructWiiNKitV1PartitionGroup(
+NKitV1Result<NKitV1PartitionGroupInspection> InspectWiiNKitV1PartitionGroup(
     BlobReader& source, const NKitV1SequentialReconstructionPlan& plan, u64 group_index,
     std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>* encrypted,
     const std::function<bool()>& cancellation_callback)
@@ -1208,14 +1208,6 @@ NKitV1Result<u64> ReconstructWiiNKitV1PartitionGroup(
                                  group_index, partition_index));
   }
   const Common::SHA1::Digest h3 = Common::SHA1::CalculateDigest(hashes[0].h2);
-  const u64 h3_position = partition.GetH3Offset() + group_index * h3.size();
-  if (h3_position + h3.size() > partition.GetReconstructedHeader().size() ||
-      !std::equal(h3.begin(), h3.end(),
-                  partition.GetReconstructedHeader().begin() + h3_position))
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::HashHierarchyMismatch, group_index,
-                                 partition_index));
-  }
 
   IOS::ES::TicketReader ticket(std::vector<u8>(
       partition.GetReconstructedHeader().begin(),
@@ -1233,7 +1225,47 @@ NKitV1Result<u64> ReconstructWiiNKitV1PartitionGroup(
                                      NKitV1ErrorCode::IntegrityCheckFailed,
                                  group_index, partition_index));
   }
-  return geometry.GetRawSize();
+  return NKitV1PartitionGroupInspection{geometry.GetRawSize(), h3};
+}
+
+NKitV1Result<u64> ReconstructWiiNKitV1PartitionGroupWithExpectedH3(
+    BlobReader& source, const NKitV1SequentialReconstructionPlan& plan, u64 group_index,
+    const Common::SHA1::Digest& expected_h3,
+    std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>* encrypted,
+    const std::function<bool()>& cancellation_callback)
+{
+  auto inspected = InspectWiiNKitV1PartitionGroup(source, plan, group_index, encrypted,
+                                                   cancellation_callback);
+  if (!inspected)
+    return std::unexpected(inspected.error());
+  if (inspected->regenerated_h3 != expected_h3)
+  {
+    return std::unexpected(
+        Error(NKitV1ErrorCode::HashHierarchyMismatch, group_index, 0));
+  }
+  return inspected->raw_size;
+}
+
+NKitV1Result<u64> ReconstructWiiNKitV1PartitionGroup(
+    BlobReader& source, const NKitV1SequentialReconstructionPlan& plan, u64 group_index,
+    std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>* encrypted,
+    const std::function<bool()>& cancellation_callback)
+{
+  const NKitV1SequentialPartition& partition = plan.GetPartition();
+  if (group_index >= partition.GetGroupCount())
+    return std::unexpected(Error(NKitV1ErrorCode::InvalidRange, group_index, 0));
+  const u64 h3_position = partition.GetH3Offset() + group_index * Common::SHA1::DIGEST_LEN;
+  if (h3_position > partition.GetReconstructedHeader().size() ||
+      Common::SHA1::DIGEST_LEN > partition.GetReconstructedHeader().size() - h3_position)
+  {
+    return std::unexpected(
+        Error(NKitV1ErrorCode::InvalidWiiGeometry, group_index, 0));
+  }
+  Common::SHA1::Digest retained_h3{};
+  std::copy_n(partition.GetReconstructedHeader().begin() + h3_position, retained_h3.size(),
+              retained_h3.begin());
+  return ReconstructWiiNKitV1PartitionGroupWithExpectedH3(
+      source, plan, group_index, retained_h3, encrypted, cancellation_callback);
 }
 
 NKitV1Result<NKitV1SequentialReconstructionResult>

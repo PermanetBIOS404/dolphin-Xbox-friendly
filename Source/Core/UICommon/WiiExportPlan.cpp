@@ -101,7 +101,8 @@ bool HasWiiExportPlanError(const WiiExportPlan& plan, WiiExportPlanError error)
 }
 
 WiiExportPlan CreateWiiExportPlan(const WiiExportSource& source,
-                                  const WiiExportDestination& destination)
+                                  const WiiExportDestination& destination,
+                                  WiiExportNKitHashPolicy nkit_hash_policy)
 {
   WiiExportPlan plan;
   plan.source_path = source.source_path;
@@ -109,6 +110,11 @@ WiiExportPlan CreateWiiExportPlan(const WiiExportSource& source,
   plan.destination_filesystem = destination.filesystem;
   plan.required_source_blob_type = source.blob_type;
   plan.requires_nkit_input = source.is_nkit;
+  plan.nkit_hash_policy =
+      source.nkit_hash_repair_required ? nkit_hash_policy :
+                                         WiiExportNKitHashPolicy::StrictOriginalHierarchy;
+  plan.nkit_repaired_group_count =
+      source.nkit_hash_repair_required ? source.nkit_repaired_group_count : 0;
   plan.normalized_id6 = NormalizeGameId(source.game_id);
   plan.sanitized_title = SanitizeTitle(source.display_title);
   plan.total_planned_output_bytes = source.expected_wbfs_size_bytes;
@@ -116,6 +122,9 @@ WiiExportPlan CreateWiiExportPlan(const WiiExportSource& source,
   plan.required_backend_capabilities[WiiExportBackendCapability::WbfsOutput] = true;
   plan.required_backend_capabilities[WiiExportBackendCapability::SourceContainerInput] = true;
   plan.required_backend_capabilities[WiiExportBackendCapability::NKitInput] = source.is_nkit;
+  plan.required_backend_capabilities[WiiExportBackendCapability::D2xPlayableHashRepair] =
+      source.nkit_hash_repair_required &&
+      plan.nkit_hash_policy == WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy;
 
   if (!destination.available_space_bytes)
   {
@@ -158,6 +167,12 @@ WiiExportPlan CreateWiiExportPlan(const WiiExportSource& source,
 
   if (source.expected_wbfs_size_bytes == 0)
     AddError(&plan, WiiExportPlanError::ZeroOutputSize);
+
+  if (source.nkit_hash_repair_required &&
+      plan.nkit_hash_policy == WiiExportNKitHashPolicy::StrictOriginalHierarchy)
+  {
+    AddError(&plan, WiiExportPlanError::D2xPlayableHashRepairRequired);
+  }
 
   if (!plan.errors.empty())
     return plan;

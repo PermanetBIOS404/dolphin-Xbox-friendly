@@ -42,6 +42,7 @@ enum class WiiExportPreflightBlocker
 enum class WiiExportPreflightWarning
 {
   UnknownAvailableSpace,
+  D2xPlayableHashRepair,
 };
 
 struct WiiExportPreflightResult
@@ -114,12 +115,24 @@ enum class WiiExportBackendOutcome
   Failed,
 };
 
+struct WiiExportPlayableRepairResult final
+{
+  bool applied = false;
+  u64 repaired_group_count = 0;
+  bool h3_table_regenerated = false;
+  bool tmd_content_digest_regenerated = false;
+  bool nintendo_authenticity_preserved = true;
+
+  constexpr bool operator==(const WiiExportPlayableRepairResult&) const = default;
+};
+
 struct WiiExportBackendResult
 {
   WiiExportBackendOutcome outcome = WiiExportBackendOutcome::Failed;
   std::vector<std::string> final_relative_paths;
   u64 final_output_bytes = 0;
   std::string diagnostic;
+  WiiExportPlayableRepairResult playable_repair;
 };
 
 class WiiExportBackend
@@ -186,6 +199,7 @@ struct WiiExportExecutionResult
   std::vector<std::string> unexpected_final_paths;
   std::vector<std::string> duplicate_final_paths;
   std::string backend_diagnostic;
+  WiiExportPlayableRepairResult playable_repair;
 };
 
 WiiExportExecutionResult ExecuteWiiExport(

@@ -65,10 +65,22 @@ void WiiExportPreviewModel::SetSplitPolicy(WiiExportSplitPolicy split_policy)
   Recalculate();
 }
 
+void WiiExportPreviewModel::SetNKitHashPolicy(WiiExportNKitHashPolicy nkit_hash_policy)
+{
+  if (!m_prepared_source.source.nkit_hash_repair_required)
+    nkit_hash_policy = WiiExportNKitHashPolicy::StrictOriginalHierarchy;
+  if (m_state.nkit_hash_policy == nkit_hash_policy)
+    return;
+
+  m_state.nkit_hash_policy = nkit_hash_policy;
+  Recalculate();
+}
+
 void WiiExportPreviewModel::Recalculate()
 {
   WiiExportPreviewState next;
   next.split_policy = m_state.split_policy;
+  next.nkit_hash_policy = m_state.nkit_hash_policy;
   next.destination = m_state.destination;
 
   if (!m_prepared_source.analysis)
@@ -110,7 +122,8 @@ void WiiExportPreviewModel::Recalculate()
   destination.split_policy = next.split_policy;
   destination.available_space_bytes = next.destination->available_space_bytes;
 
-  WiiExportPlan provisional_plan = CreateWiiExportPlan(m_prepared_source.source, destination);
+  WiiExportPlan provisional_plan = CreateWiiExportPlan(
+      m_prepared_source.source, destination, next.nkit_hash_policy);
   if (!provisional_plan.parts.empty())
   {
     std::vector<std::string> planned_paths;
@@ -147,7 +160,8 @@ void WiiExportPreviewModel::Recalculate()
   }
 
   next.plan = next.issues.empty() ?
-                  CreateWiiExportPlan(m_prepared_source.source, destination) :
+                  CreateWiiExportPlan(m_prepared_source.source, destination,
+                                      next.nkit_hash_policy) :
                   std::move(provisional_plan);
   next.preflight =
       PreflightWiiExport(next.plan, GetWiiExportNativeBackendDescriptor());

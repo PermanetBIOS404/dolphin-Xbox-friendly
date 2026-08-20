@@ -24,6 +24,8 @@ bool PlansMatchForExecution(const UICommon::WiiExportPlan& preview,
          preview.destination_filesystem == current.destination_filesystem &&
          preview.required_source_blob_type == current.required_source_blob_type &&
          preview.requires_nkit_input == current.requires_nkit_input &&
+          preview.nkit_hash_policy == current.nkit_hash_policy &&
+          preview.nkit_repaired_group_count == current.nkit_repaired_group_count &&
          preview.normalized_id6 == current.normalized_id6 &&
          preview.sanitized_title == current.sanitized_title &&
          preview.relative_directory == current.relative_directory &&
@@ -44,13 +46,14 @@ bool PlansMatchForExecution(const UICommon::WiiExportPlan& preview,
 
 std::unique_ptr<UICommon::WiiExportBackend>
 CreateNativeBackend(const UICommon::WiiExportPreparedSource& prepared_source,
-                    const UICommon::WiiExportCancellationQuery& cancellation_query)
+                    UICommon::WiiExportNKitHashPolicy nkit_hash_policy,
+                     const UICommon::WiiExportCancellationQuery& cancellation_query)
 {
   if (!prepared_source.analysis || !prepared_source.analysis->IsSuccessful())
     return nullptr;
 
   WiiExportPreparedReaderCreation created = CreateWiiExportPreparedSourceReader(
-      prepared_source, {}, cancellation_query);
+      prepared_source, {}, cancellation_query, nkit_hash_policy);
   if (!created.IsSuccessful())
     return nullptr;
 
@@ -87,6 +90,7 @@ std::optional<WiiExportGameListExecutionRequest> CreateWiiExportGameListExecutio
   request.selected_destination =
       QString::fromStdString(preview_state.destination->selected_path);
   request.split_policy = preview_state.split_policy;
+  request.nkit_hash_policy = preview_state.nkit_hash_policy;
   request.preview_plan = preview_state.plan;
   request.preview_source_fingerprint = prepared_source.analysis->GetSourceFingerprint();
   request.preview_source_recipe = prepared_source.recipe;
@@ -120,9 +124,9 @@ WiiExportGameListExecutionResult RunWiiExportGameListExecution(
     services.planned_path_inspector = InspectWiiExportPlannedPaths;
   if (!services.backend_factory)
   {
-    services.backend_factory = [&cancellation_query](
+    services.backend_factory = [&cancellation_query, &request](
                                    const UICommon::WiiExportPreparedSource& source) {
-      return CreateNativeBackend(source, cancellation_query);
+      return CreateNativeBackend(source, request.nkit_hash_policy, cancellation_query);
     };
   }
   if (!services.executor)
@@ -169,6 +173,7 @@ WiiExportGameListExecutionResult RunWiiExportGameListExecution(
   UICommon::WiiExportPreviewModel fresh_model(prepared_source,
                                                services.planned_path_inspector);
   fresh_model.SetSplitPolicy(request.split_policy);
+  fresh_model.SetNKitHashPolicy(request.nkit_hash_policy);
   UICommon::WiiExportDestinationInspection destination =
       services.destination_inspector(request.selected_destination);
   const bool destination_is_valid =

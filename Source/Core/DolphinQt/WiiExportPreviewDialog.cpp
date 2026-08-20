@@ -8,6 +8,7 @@
 #include <utility>
 
 #include <QButtonGroup>
+#include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFont>
@@ -97,6 +98,10 @@ QString GetPlanErrorMessage(UICommon::WiiExportPlanError error)
   case UICommon::WiiExportPlanError::SingleFileTooLargeForFat32:
     return WiiExportPreviewDialog::tr(
         "A single WBFS file is too large for the FAT32 destination.");
+  case UICommon::WiiExportPlanError::D2xPlayableHashRepairRequired:
+    return WiiExportPreviewDialog::tr(
+        "The original partition hash hierarchy cannot be reproduced from this NKit source. "
+        "Select the d2x playable repair option to continue.");
   }
   return WiiExportPreviewDialog::tr("The export plan is not valid.");
 }
@@ -134,6 +139,10 @@ QString GetPreflightWarningMessage(UICommon::WiiExportPreflightWarning warning)
   case UICommon::WiiExportPreflightWarning::UnknownAvailableSpace:
     return WiiExportPreviewDialog::tr(
         "Available destination space could not be determined.");
+  case UICommon::WiiExportPreflightWarning::D2xPlayableHashRepair:
+    return WiiExportPreviewDialog::tr(
+        "The partition hash hierarchy and TMD content digest will be regenerated for USB Loader "
+        "GX + d2x cIOS; this is not archival-original and is not intended for stock IOS.");
   }
   return WiiExportPreviewDialog::tr("The export preview has a warning.");
 }
@@ -224,6 +233,18 @@ WiiExportPreviewDialog::WiiExportPreviewDialog(
   m_layout_summary->setObjectName(QStringLiteral("wiiExportLayoutSummary"));
   layout_box->addWidget(m_layout_summary);
 
+  const bool d2x_repair_required = m_model.GetPreparedSource().source.nkit_hash_repair_required;
+  m_d2x_repair = new QCheckBox(tr("Create a playable WBFS for USB Loader GX + d2x cIOS"));
+  m_d2x_repair->setObjectName(QStringLiteral("wiiExportD2xRepair"));
+  m_d2x_repair->setChecked(false);
+  m_d2x_repair->setVisible(d2x_repair_required);
+  m_d2x_explanation = new QLabel(
+      tr("This rebuilds the Wii partition hash hierarchy and TMD content digest. The result is "
+         "not archival-original and is intended for USB Loader GX + d2x cIOS, not stock IOS."));
+  m_d2x_explanation->setObjectName(QStringLiteral("wiiExportD2xExplanation"));
+  m_d2x_explanation->setWordWrap(true);
+  m_d2x_explanation->setVisible(d2x_repair_required);
+
   auto* const output_group = new QGroupBox(tr("Planned output"));
   auto* const output_layout = new QVBoxLayout(output_group);
   m_planned_paths = new QListWidget;
@@ -252,6 +273,8 @@ WiiExportPreviewDialog::WiiExportPreviewDialog(
   main_layout->addWidget(source_group);
   main_layout->addWidget(destination_group);
   main_layout->addWidget(layout_group);
+  main_layout->addWidget(m_d2x_repair);
+  main_layout->addWidget(m_d2x_explanation);
   main_layout->addWidget(output_group, 1);
   main_layout->addWidget(status_group);
   main_layout->addWidget(buttons);
@@ -259,6 +282,12 @@ WiiExportPreviewDialog::WiiExportPreviewDialog(
   connect(browse, &QPushButton::clicked, this, &WiiExportPreviewDialog::BrowseForDestination);
   connect(m_split_policy, &QButtonGroup::idClicked, this, [this](int id) {
     SetSplitPolicy(static_cast<UICommon::WiiExportSplitPolicy>(id));
+  });
+  connect(m_d2x_repair, &QCheckBox::toggled, this, [this](bool checked) {
+    m_model.SetNKitHashPolicy(
+        checked ? UICommon::WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy :
+                  UICommon::WiiExportNKitHashPolicy::StrictOriginalHierarchy);
+    UpdatePresentation();
   });
   connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
   connect(m_export_button, &QPushButton::clicked, this, &QDialog::accept);
@@ -311,6 +340,11 @@ void WiiExportPreviewDialog::SetSplitPolicy(UICommon::WiiExportSplitPolicy split
 void WiiExportPreviewDialog::UpdatePresentation()
 {
   const UICommon::WiiExportPreviewState& state = m_model.GetState();
+  const bool d2x_repair_required = m_model.GetPreparedSource().source.nkit_hash_repair_required;
+  m_d2x_repair->setVisible(d2x_repair_required);
+  m_d2x_explanation->setVisible(d2x_repair_required);
+  m_d2x_repair->setChecked(
+      state.nkit_hash_policy == UICommon::WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy);
   if (state.destination)
   {
     m_destination_path->setText(QString::fromStdString(state.destination->selected_path));

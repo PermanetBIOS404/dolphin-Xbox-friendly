@@ -20,6 +20,8 @@ struct WiiExportGameListExecutionRequest final
   WiiExportGameListEntry entry;
   QString selected_destination;
   UICommon::WiiExportSplitPolicy split_policy = UICommon::WiiExportSplitPolicy::Automatic;
+  UICommon::WiiExportNKitHashPolicy nkit_hash_policy =
+      UICommon::WiiExportNKitHashPolicy::StrictOriginalHierarchy;
   UICommon::WiiExportPlan preview_plan;
   Common::SHA1::Digest preview_source_fingerprint{};
   UICommon::WiiExportSourceRecipe preview_source_recipe;

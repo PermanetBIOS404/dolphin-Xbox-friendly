@@ -16,6 +16,7 @@ using UICommon::WiiExportBackendCapability;
 using UICommon::WiiExportDestination;
 using UICommon::WiiExportDestinationFilesystem;
 using UICommon::WiiExportFreeSpaceAssessment;
+using UICommon::WiiExportNKitHashPolicy;
 using UICommon::WiiExportPlan;
 using UICommon::WiiExportPlanError;
 using UICommon::WiiExportPlayableAssessment;
@@ -502,6 +503,44 @@ TEST(WiiExportPlan, ReconstructedViewPreservesExternalArchivalRecoveryTruth)
             plan.archival_recovery);
   EXPECT_FALSE(plan.requires_nkit_input);
   EXPECT_FALSE(HasCapability(plan, WiiExportBackendCapability::NKitInput));
+}
+
+TEST(WiiExportPlan, D2xPlayableHashRepairRequiresAnExplicitPolicy)
+{
+  WiiExportSource source = MakeSource();
+  source.blob_type = DiscIO::BlobType::PLAIN;
+  source.nkit_hash_repair_required = true;
+  source.nkit_repaired_group_count = 2;
+
+  const WiiExportPlan strict = UICommon::CreateWiiExportPlan(source, MakeDestination());
+  EXPECT_FALSE(strict.succeeded);
+  EXPECT_TRUE(HasError(strict, WiiExportPlanError::D2xPlayableHashRepairRequired));
+  EXPECT_EQ(strict.nkit_hash_policy, WiiExportNKitHashPolicy::StrictOriginalHierarchy);
+  EXPECT_EQ(strict.nkit_repaired_group_count, 2u);
+  EXPECT_FALSE(HasCapability(strict, WiiExportBackendCapability::D2xPlayableHashRepair));
+
+  const WiiExportPlan d2x = UICommon::CreateWiiExportPlan(
+      source, MakeDestination(), WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy);
+  ASSERT_TRUE(d2x.succeeded);
+  EXPECT_FALSE(HasError(d2x, WiiExportPlanError::D2xPlayableHashRepairRequired));
+  EXPECT_EQ(d2x.nkit_hash_policy,
+            WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy);
+  EXPECT_EQ(d2x.nkit_repaired_group_count, 2u);
+  EXPECT_TRUE(HasCapability(d2x, WiiExportBackendCapability::D2xPlayableHashRepair));
+  EXPECT_FALSE(d2x.requires_nkit_input);
+  EXPECT_FALSE(HasCapability(d2x, WiiExportBackendCapability::NKitInput));
+}
+
+TEST(WiiExportPlan, OrdinarySourcesIgnoreAnInapplicableD2xPolicy)
+{
+  const WiiExportPlan plan = UICommon::CreateWiiExportPlan(
+      MakeSource(), MakeDestination(),
+      WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy);
+
+  ASSERT_TRUE(plan.succeeded);
+  EXPECT_EQ(plan.nkit_hash_policy, WiiExportNKitHashPolicy::StrictOriginalHierarchy);
+  EXPECT_EQ(plan.nkit_repaired_group_count, 0u);
+  EXPECT_FALSE(HasCapability(plan, WiiExportBackendCapability::D2xPlayableHashRepair));
 }
 
 TEST(WiiExportPlan, BackendCapabilitiesReflectSingleAndSplitOutput)

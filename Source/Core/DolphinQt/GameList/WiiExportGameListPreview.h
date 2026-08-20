@@ -62,6 +62,7 @@ enum class WiiExportNKitV1Support
 {
   NotNKit,
   Supported,
+  SupportedWithD2xPlayableRepair,
   RecoveryRequired,
   UnsupportedLayout,
   UnsupportedGapContext,
@@ -121,7 +122,9 @@ WiiExportGameListSourcePreparation PrepareWiiExportGameListSource(
 // rebuilt from the compact source and compared before its conventional view is returned.
 WiiExportPreparedReaderCreation CreateWiiExportPreparedSourceReader(
     const UICommon::WiiExportPreparedSource& prepared_source,
-    WiiExportBlobLoader blob_loader = {}, WiiExportCancellationQuery cancellation_query = {});
+    WiiExportBlobLoader blob_loader = {}, WiiExportCancellationQuery cancellation_query = {},
+    UICommon::WiiExportNKitHashPolicy nkit_hash_policy =
+        UICommon::WiiExportNKitHashPolicy::StrictOriginalHierarchy);
 
 using WiiExportGameListSourcePreparer =
     std::function<WiiExportGameListSourcePreparation(const WiiExportGameListEntry& entry)>;

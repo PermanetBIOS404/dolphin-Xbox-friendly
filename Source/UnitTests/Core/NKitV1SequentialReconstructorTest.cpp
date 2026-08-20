@@ -1140,6 +1140,28 @@ SyntheticN4NKitFixture BuildSyntheticLateHashMismatchNKitFixture(
   return fixture;
 }
 
+SyntheticN4NKitFixture BuildSyntheticMultipleHashMismatchNKitFixture(
+    const SyntheticN4NKitFixture& valid)
+{
+  SyntheticN4NKitFixture fixture = valid;
+  fixture.bytes = std::make_shared<std::vector<u8>>(*valid.bytes);
+  std::vector<u8>& source = *fixture.bytes;
+  constexpr std::array<u64, 2> mismatched_groups = {0, 2};
+  for (const u64 group : mismatched_groups)
+  {
+    source[SOURCE_PARTITION_OFFSET + H3_OFFSET + group * Common::SHA1::DIGEST_LEN] ^= 0x80;
+  }
+
+  const std::span<const u8> h3_table(source.data() + SOURCE_PARTITION_OFFSET + H3_OFFSET,
+                                     WII_PARTITION_H3_SIZE);
+  std::vector<u8> tmd =
+      BuildSyntheticTmd(Common::SHA1::CalculateDigest(h3_table.data(), h3_table.size()));
+  WriteBigEndianU64(tmd, sizeof(IOS::ES::TMDHeader) + offsetof(IOS::ES::Content, size),
+                    fixture.raw_partition_size);
+  std::copy(tmd.begin(), tmd.end(), source.begin() + SOURCE_PARTITION_OFFSET + TMD_OFFSET);
+  return fixture;
+}
+
 constexpr u64 O2_RETAIL_FULL_GROUPS = 2109;
 constexpr u32 O2_RETAIL_FINAL_CLUSTERS = 52;
 constexpr u64 O2_RETAIL_GROUP_COUNT = O2_RETAIL_FULL_GROUPS + 1;
@@ -2934,8 +2956,7 @@ TEST_F(NKitV1RandomAccessTest, N5DefaultExecutionRebuildsAndWritesValidatedSynth
   EXPECT_EQ(regular_files, 2u);
 }
 
-TEST_F(NKitV1RandomAccessTest,
-       O4NKitExecutionValidatesAllUsedBlocksBeforeInvokingTheWriter)
+TEST_F(NKitV1RandomAccessTest, O6BRepairDiscoveryKeepsPreviewStrictAndRecreatesExplicitD2xReader)
 {
   const SyntheticN4NKitFixture mismatch =
       BuildSyntheticLateHashMismatchNKitFixture(s_nkit);
@@ -2944,30 +2965,138 @@ TEST_F(NKitV1RandomAccessTest,
   const auto entry = MakeN5Entry(source_path);
   const auto preparation = DolphinQt::PrepareWiiExportGameListSource(entry);
   ASSERT_TRUE(preparation.IsSuccessful());
+  ASSERT_EQ(preparation.nkit_support,
+            DolphinQt::WiiExportNKitV1Support::SupportedWithD2xPlayableRepair);
+  ASSERT_TRUE(preparation.prepared_source->source.nkit_hash_repair_required);
 
   UICommon::WiiExportPreviewModel model(*preparation.prepared_source, N5NoCollisions);
   ASSERT_TRUE(model.SelectDestination(MakeN5Destination(m_temp_directory)));
-  EXPECT_EQ(model.GetState().readiness, UICommon::WiiExportPreviewReadiness::Ready);
-  auto request = DolphinQt::CreateWiiExportGameListExecutionRequest(
-      entry, *preparation.prepared_source, model.GetState());
-  ASSERT_TRUE(request.has_value());
+  EXPECT_EQ(model.GetState().nkit_hash_policy,
+            UICommon::WiiExportNKitHashPolicy::StrictOriginalHierarchy);
+  EXPECT_EQ(model.GetState().readiness, UICommon::WiiExportPreviewReadiness::Blocked);
+  EXPECT_TRUE(UICommon::HasWiiExportPlanError(
+      model.GetState().plan, UICommon::WiiExportPlanError::D2xPlayableHashRepairRequired));
 
-  const auto result = DolphinQt::RunWiiExportGameListExecution(
-      *request, {}, {}, MakeN5ExecutionServices(m_temp_directory));
-  EXPECT_EQ(result.revalidation_error,
-            DolphinQt::WiiExportGameListRevalidationError::None);
-  ASSERT_TRUE(result.execution.has_value());
-  EXPECT_TRUE(result.execution_invoked);
-  EXPECT_EQ(result.execution->outcome, UICommon::WiiExportExecutionOutcome::Failed);
-  EXPECT_NE(result.execution->backend_diagnostic.find("partition hash data"),
-            std::string::npos);
-  EXPECT_NE(result.execution->backend_diagnostic.find("group 2"), std::string::npos);
+  auto created = DolphinQt::CreateWiiExportPreparedSourceReader(
+      *preparation.prepared_source,
+      [&mismatch](const std::string&) { return mismatch.MakeReader(); }, {},
+      UICommon::WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy);
+  ASSERT_TRUE(created.IsSuccessful());
+  EXPECT_EQ(created.reader->GetBlobType(), BlobType::PLAIN);
+}
 
-  const std::filesystem::path output =
-      std::filesystem::path(m_temp_directory) / model.GetState().plan.primary_relative_path;
-  EXPECT_FALSE(File::Exists(output.string()));
-  for (const auto& file : std::filesystem::recursive_directory_iterator(m_temp_directory))
-    EXPECT_FALSE(file.path().filename().string().starts_with("late-hash-mismatch.xxx"));
+TEST_F(NKitV1RandomAccessTest, O6BRepairH3AndTmdByteOraclesAreExactAndDeterministic)
+{
+  const SyntheticN4NKitFixture mismatch =
+      BuildSyntheticMultipleHashMismatchNKitFixture(s_nkit);
+  const auto prepare = [&]() {
+    auto strict = TryCreateWiiNKitV1ReconstructedReader(mismatch.MakeReader());
+    EXPECT_TRUE(strict.has_value());
+    if (!strict)
+      return NKitV1Result<std::unique_ptr<NKitV1ReconstructedBlobReader>>{
+          std::unexpected(strict.error())};
+
+    std::unique_ptr<VolumeDisc> volume = CreateDisc((*strict)->CopyReader());
+    EXPECT_NE(volume, nullptr);
+    if (!volume)
+      return NKitV1Result<std::unique_ptr<NKitV1ReconstructedBlobReader>>{
+          std::unexpected(NKitV1Error{NKitV1ErrorCode::ReadFailed})};
+    const WbfsAnalysis analysis = AnalyzeWbfs(*volume);
+    EXPECT_TRUE(analysis.IsSuccessful());
+    return PrepareWiiNKitV1D2xPlayableRepairedReader(std::move(*strict), analysis);
+  };
+
+  auto first = prepare();
+  ASSERT_TRUE(first.has_value());
+  auto second = prepare();
+  ASSERT_TRUE(second.has_value());
+  const NKitV1HashHierarchyRepairPlan& first_plan = (*first)->GetHashHierarchyRepairPlan();
+  const NKitV1HashHierarchyRepairPlan& second_plan = (*second)->GetHashHierarchyRepairPlan();
+  ASSERT_EQ(first_plan.GetPolicy(), NKitV1HashHierarchyPolicy::D2xPlayableRegeneratedHierarchy);
+  ASSERT_EQ(first_plan.GetNintendoAuthenticity(),
+            NKitV1NintendoAuthenticity::InvalidatedByPlayableRepair);
+  ASSERT_EQ(first_plan.GetRepairs().size(), 2u);
+  EXPECT_EQ(first_plan.GetRepairs()[0].GetGroupIndex(), 0u);
+  EXPECT_EQ(first_plan.GetRepairs()[1].GetGroupIndex(), 2u);
+  EXPECT_LT(first_plan.GetRepairs()[0].GetGroupIndex(),
+            first_plan.GetRepairs()[1].GetGroupIndex());
+  EXPECT_EQ(first_plan.GetRepairs()[0].GetGroupIndex(),
+            second_plan.GetRepairs()[0].GetGroupIndex());
+  EXPECT_EQ(first_plan.GetRepairs()[1].GetGroupIndex(),
+            second_plan.GetRepairs()[1].GetGroupIndex());
+  EXPECT_EQ(first_plan.GetEffectivePartitionHeader(), second_plan.GetEffectivePartitionHeader());
+  EXPECT_EQ(first_plan.GetRepairedH3TableDigest(), second_plan.GetRepairedH3TableDigest());
+  EXPECT_EQ(first_plan.GetRepairedTmdContentDigest(), second_plan.GetRepairedTmdContentDigest());
+
+  const NKitV1SequentialPartition& partition = (*first)->GetIndex().GetPlan().GetPartition();
+  const u64 h3_offset = partition.GetH3Offset();
+  const std::vector<u8>& original_header =
+      (*first)->GetIndex().GetPlan().GetPartition().GetReconstructedHeader();
+  std::vector<u8> expected_header = original_header;
+  std::vector<u8> expected_h3(expected_header.begin() + h3_offset,
+                              expected_header.begin() + h3_offset + WII_PARTITION_H3_SIZE);
+  Common::SHA1::Digest expected_group_a{};
+  for (const u64 group : {0u, 2u})
+  {
+    const Common::SHA1::Digest expected_group = CalculateSyntheticGroupH3(
+        s_conventional.decrypted_blocks.data() + group * VolumeWii::BLOCKS_PER_GROUP);
+    if (group == 0)
+      expected_group_a = expected_group;
+    std::copy(expected_group.begin(), expected_group.end(),
+              expected_h3.begin() + group * Common::SHA1::DIGEST_LEN);
+  }
+  std::copy(expected_h3.begin(), expected_h3.end(), expected_header.begin() + h3_offset);
+  const Common::SHA1::Digest expected_digest =
+      Common::SHA1::CalculateDigest(expected_h3.data(), expected_h3.size());
+  std::copy(expected_digest.begin(), expected_digest.end(),
+            expected_header.begin() + first_plan.GetTmdContentDigestOffset());
+
+  EXPECT_EQ(first_plan.GetEffectivePartitionHeader(), expected_header);
+  EXPECT_EQ(first_plan.GetRepairedH3TableDigest(), expected_digest);
+  EXPECT_EQ(first_plan.GetRepairedTmdContentDigest(), expected_digest);
+  EXPECT_EQ(first_plan.GetRepairedH3TableDigest(),
+            Common::SHA1::CalculateDigest(expected_h3.data(), expected_h3.size()));
+  EXPECT_EQ(first_plan.GetRepairs()[0].GetRegeneratedH3(), expected_group_a);
+
+  const size_t matching_group_offset = static_cast<size_t>(h3_offset + Common::SHA1::DIGEST_LEN);
+  EXPECT_TRUE(std::equal(expected_header.begin() + matching_group_offset,
+                         expected_header.begin() + matching_group_offset +
+                             Common::SHA1::DIGEST_LEN,
+                         original_header.begin() + matching_group_offset));
+  for (size_t offset = 0; offset < expected_h3.size(); ++offset)
+  {
+    const bool repaired_group = (offset < 2 * Common::SHA1::DIGEST_LEN) ||
+                                (offset >= 2 * Common::SHA1::DIGEST_LEN &&
+                                 offset < 3 * Common::SHA1::DIGEST_LEN);
+    if (!repaired_group)
+    {
+      EXPECT_EQ(expected_h3[offset], original_header[h3_offset + offset]);
+    }
+  }
+  EXPECT_TRUE(std::equal(expected_header.begin() + TMD_OFFSET,
+                         expected_header.begin() + TMD_OFFSET + sizeof(IOS::SignatureRSA2048),
+                         original_header.begin() + TMD_OFFSET));
+  EXPECT_NE(expected_header[first_plan.GetTmdContentDigestOffset()],
+            original_header[first_plan.GetTmdContentDigestOffset()]);
+  for (size_t offset = TMD_OFFSET; offset < TMD_OFFSET + sizeof(IOS::ES::TMDHeader) +
+                                             sizeof(IOS::ES::Content);
+       ++offset)
+  {
+    const bool is_digest = offset >= first_plan.GetTmdContentDigestOffset() &&
+                           offset < first_plan.GetTmdContentDigestOffset() +
+                                        Common::SHA1::DIGEST_LEN;
+    if (!is_digest)
+    {
+      EXPECT_EQ(expected_header[offset], original_header[offset]);
+    }
+  }
+
+  std::vector<u8> repaired_h3(WII_PARTITION_H3_SIZE);
+  ASSERT_TRUE((*first)->Read(ORIGINAL_PARTITION_OFFSET + h3_offset, repaired_h3.size(),
+                             repaired_h3.data()));
+  EXPECT_EQ(repaired_h3, expected_h3);
+  EXPECT_EQ((*first)->GetHashHierarchyRepairPlan().GetTmdContentDigestOffset(),
+            first_plan.GetTmdContentDigestOffset());
 }
 
 TEST_F(NKitV1RandomAccessTest, N5FreshIdentitySupportAndCancellationRevalidationAreAuthoritative)

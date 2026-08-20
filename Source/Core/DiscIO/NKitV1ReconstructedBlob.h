@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "Common/CommonTypes.h"
+#include "Common/Crypto/SHA1.h"
 #include "DiscIO/Blob.h"
 #include "DiscIO/NKitV1SequentialReconstructor.h"
 
@@ -19,6 +20,93 @@ namespace DiscIO
 {
 class NKitV1ReconstructionIndex;
 class WbfsAnalysis;
+class NKitV1HashHierarchyRepairPlanBuilder;
+
+enum class NKitV1HashHierarchyPolicy
+{
+  StrictOriginalHierarchy,
+  D2xPlayableRegeneratedHierarchy,
+};
+
+enum class NKitV1NintendoAuthenticity
+{
+  OriginalMetadataPreserved,
+  InvalidatedByPlayableRepair,
+};
+
+class NKitV1HashHierarchyRepair final
+{
+public:
+  u64 GetGroupIndex() const { return m_group_index; }
+  const Common::SHA1::Digest& GetOriginalH3() const { return m_original_h3; }
+  const Common::SHA1::Digest& GetRegeneratedH3() const { return m_regenerated_h3; }
+
+private:
+  friend class NKitV1HashHierarchyRepairPlanBuilder;
+
+  u64 m_group_index = 0;
+  Common::SHA1::Digest m_original_h3{};
+  Common::SHA1::Digest m_regenerated_h3{};
+};
+
+// Immutable metadata overlay for one reconstructed conventional-disc view. Strict readers retain
+// the original partition header. A d2x playable-repair reader exposes a finalized copy containing
+// only the authorized H3-entry replacements and the corresponding sole TMD content digest update.
+class NKitV1HashHierarchyRepairPlan final
+{
+public:
+  NKitV1HashHierarchyPolicy GetPolicy() const { return m_policy; }
+  NKitV1NintendoAuthenticity GetNintendoAuthenticity() const { return m_authenticity; }
+  const std::vector<NKitV1HashHierarchyRepair>& GetRepairs() const { return m_repairs; }
+  const std::vector<u8>& GetEffectivePartitionHeader() const
+  {
+    return m_effective_partition_header;
+  }
+  const Common::SHA1::Digest& GetOriginalH3TableDigest() const
+  {
+    return m_original_h3_table_digest;
+  }
+  const Common::SHA1::Digest& GetRepairedH3TableDigest() const
+  {
+    return m_repaired_h3_table_digest;
+  }
+  const Common::SHA1::Digest& GetOriginalTmdContentDigest() const
+  {
+    return m_original_tmd_content_digest;
+  }
+  const Common::SHA1::Digest& GetRepairedTmdContentDigest() const
+  {
+    return m_repaired_tmd_content_digest;
+  }
+  u64 GetTmdContentDigestOffset() const { return m_tmd_content_digest_offset; }
+  u64 GetCompactPartitionHeaderSourceOffset() const
+  {
+    return m_compact_partition_header_source_offset;
+  }
+  u64 GetCompactPartitionHeaderSize() const { return m_compact_partition_header_size; }
+  const Common::SHA1::Digest& GetCompactPartitionHeaderFingerprint() const
+  {
+    return m_compact_partition_header_fingerprint;
+  }
+  bool HasRepairs() const { return !m_repairs.empty(); }
+
+private:
+  friend class NKitV1HashHierarchyRepairPlanBuilder;
+
+  NKitV1HashHierarchyPolicy m_policy = NKitV1HashHierarchyPolicy::StrictOriginalHierarchy;
+  NKitV1NintendoAuthenticity m_authenticity =
+      NKitV1NintendoAuthenticity::OriginalMetadataPreserved;
+  std::vector<NKitV1HashHierarchyRepair> m_repairs;
+  std::vector<u8> m_effective_partition_header;
+  Common::SHA1::Digest m_original_h3_table_digest{};
+  Common::SHA1::Digest m_repaired_h3_table_digest{};
+  Common::SHA1::Digest m_original_tmd_content_digest{};
+  Common::SHA1::Digest m_repaired_tmd_content_digest{};
+  u64 m_tmd_content_digest_offset = 0;
+  u64 m_compact_partition_header_source_offset = 0;
+  u64 m_compact_partition_header_size = 0;
+  Common::SHA1::Digest m_compact_partition_header_fingerprint{};
+};
 
 enum class NKitV1ReconstructedRangeKind
 {
@@ -126,6 +214,10 @@ public:
   bool Read(u64 offset, u64 size, u8* out_ptr) override;
 
   const NKitV1ReconstructionIndex& GetIndex() const { return *m_index; }
+  const NKitV1HashHierarchyRepairPlan& GetHashHierarchyRepairPlan() const
+  {
+    return *m_hash_hierarchy_repair_plan;
+  }
   NKitV1ReconstructedCacheStats GetCacheStats() const;
   const std::optional<NKitV1Error>& GetLastError() const { return m_last_error; }
   const std::optional<u64>& GetLastFailureLogicalOffset() const
@@ -142,6 +234,10 @@ private:
   TryCreateWiiNKitV1ReconstructedReader(
       std::unique_ptr<BlobReader> source,
       const std::function<bool()>& cancellation_callback);
+  friend NKitV1Result<std::unique_ptr<NKitV1ReconstructedBlobReader>>
+  PrepareWiiNKitV1D2xPlayableRepairedReader(
+      std::unique_ptr<NKitV1ReconstructedBlobReader> strict_reader,
+      const WbfsAnalysis& analysis, const std::function<bool()>& cancellation_callback);
 
   struct CachedGroup
   {
@@ -153,7 +249,8 @@ private:
 
   NKitV1ReconstructedBlobReader(
       std::unique_ptr<BlobReader> source,
-      std::shared_ptr<const NKitV1ReconstructionIndex> index);
+      std::shared_ptr<const NKitV1ReconstructionIndex> index,
+      std::shared_ptr<const NKitV1HashHierarchyRepairPlan> hash_hierarchy_repair_plan);
 
   NKitV1Result<const CachedGroup*>
   GetGroup(u64 group_index, const std::function<bool()>& cancellation_callback);
@@ -161,6 +258,7 @@ private:
 
   std::unique_ptr<BlobReader> m_source;
   std::shared_ptr<const NKitV1ReconstructionIndex> m_index;
+  std::shared_ptr<const NKitV1HashHierarchyRepairPlan> m_hash_hierarchy_repair_plan;
   std::vector<CachedGroup> m_cache;
   u64 m_cache_clock = 0;
   NKitV1ReconstructedCacheStats m_cache_stats;
@@ -184,5 +282,14 @@ NKitV1Result<std::unique_ptr<NKitV1ReconstructedBlobReader>>
 TryCreateWiiNKitV1ReconstructedReader(
     std::unique_ptr<BlobReader> source,
     const std::function<bool()>& cancellation_callback = {});
+
+// Consumes a strict reconstructed reader and a successful analysis of that same conventional view.
+// Every reconstructed group selected by the immutable WBFS block map is inspected before a new
+// reader is returned. Only H3 mismatches are repairable; every other reconstruction failure remains
+// fail-closed. The returned reader shares a finalized immutable repair plan across CopyReader().
+NKitV1Result<std::unique_ptr<NKitV1ReconstructedBlobReader>>
+PrepareWiiNKitV1D2xPlayableRepairedReader(
+    std::unique_ptr<NKitV1ReconstructedBlobReader> strict_reader,
+    const WbfsAnalysis& analysis, const std::function<bool()>& cancellation_callback = {});
 
 }  // namespace DiscIO

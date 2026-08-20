@@ -12,6 +12,7 @@
 #include "UICommon/WiiExportPreview.h"
 
 class QButtonGroup;
+class QCheckBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -46,6 +47,8 @@ private:
   QLabel* m_filesystem_capability = nullptr;
   QButtonGroup* m_split_policy = nullptr;
   QLabel* m_layout_summary = nullptr;
+  QCheckBox* m_d2x_repair = nullptr;
+  QLabel* m_d2x_explanation = nullptr;
   QListWidget* m_planned_paths = nullptr;
   QLabel* m_status = nullptr;
   QLabel* m_messages = nullptr;

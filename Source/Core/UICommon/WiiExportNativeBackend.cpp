@@ -53,6 +53,7 @@ WiiExportBackendDescriptor MakeDescriptor()
   descriptor.supported_capabilities[WiiExportBackendCapability::WbfsOutput] = true;
   descriptor.supported_capabilities[WiiExportBackendCapability::SplitWbfsOutput] = true;
   descriptor.supported_capabilities[WiiExportBackendCapability::SourceContainerInput] = true;
+  descriptor.supported_capabilities[WiiExportBackendCapability::D2xPlayableHashRepair] = true;
   descriptor.supported_source_blob_types = {DiscIO::BlobType::PLAIN, DiscIO::BlobType::RVZ};
   descriptor.supports_cancellation = true;
   descriptor.supports_progress = true;
@@ -73,6 +74,27 @@ WiiExportBackendResult Cancelled(std::string diagnostic)
   result.outcome = WiiExportBackendOutcome::Cancelled;
   result.diagnostic = std::move(diagnostic);
   return result;
+}
+
+std::string GetReaderPolicyDiagnostic(WiiExportNKitHashPolicy planned_policy,
+                                      const DiscIO::NKitV1ReconstructedBlobReader* reader)
+{
+  const bool planned_repair =
+      planned_policy == WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy;
+  if (!reader)
+  {
+    return planned_repair ? "native backend requires a repaired reader for the d2x playable plan" :
+                            std::string{};
+  }
+
+  const bool reader_repair =
+      reader->GetHashHierarchyRepairPlan().GetPolicy() ==
+      DiscIO::NKitV1HashHierarchyPolicy::D2xPlayableRegeneratedHierarchy;
+  if (planned_repair != reader_repair)
+  {
+    return "native backend plan policy does not match the prepared reader policy";
+  }
+  return {};
 }
 
 std::string GetWriteFailureDiagnostic(DiscIO::WbfsWriteStatus status)
@@ -449,6 +471,17 @@ WiiExportBackendResult WiiExportNativeBackend::Execute(
     return Failed("native backend analysis size does not match the Wii export plan");
   }
 
+  const std::string policy_diagnostic =
+      GetReaderPolicyDiagnostic(plan.nkit_hash_policy, m_impl->reconstructed_source_reader);
+  if (!policy_diagnostic.empty())
+    return Failed(policy_diagnostic);
+  if (m_impl->reconstructed_source_reader &&
+      m_impl->reconstructed_source_reader->GetHashHierarchyRepairPlan().GetRepairs().size() !=
+          plan.nkit_repaired_group_count)
+  {
+    return Failed("native backend repaired-group count does not match the Wii export plan");
+  }
+
   const ResolvedOutput output = ResolveOutput(plan);
   if (!output.succeeded)
     return Failed(output.diagnostic);
@@ -500,6 +533,21 @@ WiiExportBackendResult WiiExportNativeBackend::Execute(
   result.final_relative_paths.reserve(plan.parts.size());
   for (const WiiExportPart& part : plan.parts)
     result.final_relative_paths.emplace_back(part.relative_path);
+  if (m_impl->reconstructed_source_reader &&
+      plan.nkit_hash_policy == WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy)
+  {
+    const DiscIO::NKitV1HashHierarchyRepairPlan& repair_plan =
+        m_impl->reconstructed_source_reader->GetHashHierarchyRepairPlan();
+    result.playable_repair = {
+        .applied = true,
+        .repaired_group_count = repair_plan.GetRepairs().size(),
+        .h3_table_regenerated =
+            repair_plan.GetOriginalH3TableDigest() != repair_plan.GetRepairedH3TableDigest(),
+        .tmd_content_digest_regenerated = repair_plan.GetOriginalTmdContentDigest() !=
+                                          repair_plan.GetRepairedTmdContentDigest(),
+        .nintendo_authenticity_preserved = false,
+    };
+  }
   return result;
 }
 

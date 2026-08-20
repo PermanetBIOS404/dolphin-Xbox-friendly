@@ -33,6 +33,14 @@ enum class WiiExportSplitPolicy
   ForceSingle,
 };
 
+// Strict reconstruction preserves O4's fail-closed original-hierarchy requirement. The d2x
+// policy is an explicit playable-output target whose repaired metadata is not Nintendo-authentic.
+enum class WiiExportNKitHashPolicy
+{
+  StrictOriginalHierarchy,
+  D2xPlayableRegeneratedHierarchy,
+};
+
 enum class WiiExportPlanError
 {
   InvalidGameId,
@@ -43,6 +51,7 @@ enum class WiiExportPlanError
   TooManySplitParts,
   FilesystemCapabilityRequired,
   SingleFileTooLargeForFat32,
+  D2xPlayableHashRepairRequired,
 };
 
 enum class WiiExportFreeSpaceAssessment
@@ -71,6 +80,7 @@ enum class WiiExportBackendCapability : u32
   SplitWbfsOutput = 1 << 1,
   SourceContainerInput = 1 << 2,
   NKitInput = 1 << 3,
+  D2xPlayableHashRepair = 1 << 4,
 };
 
 using WiiExportBackendCapabilities = Common::Flags<WiiExportBackendCapability>;
@@ -86,6 +96,10 @@ struct WiiExportSource
   // The prepared conventional view can be playable even when its compact NKit origin still needs
   // external data for byte-identical archival restoration.
   bool requires_external_archival_recovery = false;
+  // These facts describe an immutable prepared repair plan. They do not select the d2x policy;
+  // that choice belongs to preview state and must be explicit.
+  bool nkit_hash_repair_required = false;
+  u64 nkit_repaired_group_count = 0;
   u64 expected_wbfs_size_bytes = 0;
 };
 
@@ -119,6 +133,9 @@ struct WiiExportPlan
       WiiExportDestinationFilesystem::Unknown;
   DiscIO::BlobType required_source_blob_type = DiscIO::BlobType::PLAIN;
   bool requires_nkit_input = false;
+  WiiExportNKitHashPolicy nkit_hash_policy =
+      WiiExportNKitHashPolicy::StrictOriginalHierarchy;
+  u64 nkit_repaired_group_count = 0;
 
   std::string normalized_id6;
   std::string sanitized_title;
@@ -146,6 +163,8 @@ struct WiiExportPlan
 };
 
 WiiExportPlan CreateWiiExportPlan(const WiiExportSource& source,
-                                  const WiiExportDestination& destination);
+                                  const WiiExportDestination& destination,
+                                  WiiExportNKitHashPolicy nkit_hash_policy =
+                                      WiiExportNKitHashPolicy::StrictOriginalHierarchy);
 bool HasWiiExportPlanError(const WiiExportPlan& plan, WiiExportPlanError error);
 }  // namespace UICommon
