@@ -1,4 +1,4 @@
-name: Build Linux (Xbox-friendly)
+name: Build Linux (Dolphin RWiN)
 
 on:
   workflow_dispatch:
@@ -69,11 +69,11 @@ jobs:
           set -euxo pipefail
           cp -r Data/Sys/ Build/Binaries/
           touch Build/Binaries/portable.txt
-          tar -C Build -czf Dolphin-Xbox-friendly-Linux-Portable.tar.gz Binaries
+          tar -C Build -czf Dolphin-RWiN-Linux-Portable.tar.gz Binaries
 
       - name: Upload portable bundle
         uses: actions/upload-artifact@v4
         with:
-          name: Dolphin-Xbox-friendly-Linux-Portable
-          path: Dolphin-Xbox-friendly-Linux-Portable.tar.gz
+          name: Dolphin-RWiN-Linux-Portable
+          path: Dolphin-RWiN-Linux-Portable.tar.gz
           if-no-files-found: error
