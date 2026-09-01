@@ -58,7 +58,8 @@ jobs:
             -DCMAKE_CXX_FLAGS:STRING="-ffile-prefix-map=${GITHUB_WORKSPACE}=Dolphin-RWiN" \
             -DLINUX_LOCAL_DEV=true \
             -DENABLE_ANALYTICS=OFF \
-            -DENABLE_DISCORD_PRESENCE=OFF
+            -DENABLE_DISCORD_PRESENCE=OFF \
+            -DENABLE_LLVM=OFF
 
       - name: Build
         shell: bash
