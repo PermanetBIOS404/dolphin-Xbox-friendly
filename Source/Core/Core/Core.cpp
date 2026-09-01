@@ -35,7 +35,6 @@
 #include "Common/StringUtil.h"
 #include "Common/Thread.h"
 #include "Common/TimeUtil.h"
-#include "Common/Version.h"
 
 #include "Core/AchievementManager.h"
 #include "Core/Boot/Boot.h"
@@ -902,7 +901,7 @@ void UpdateTitle(Core::System& system)
       "{} {} | {} | {}", system.GetPowerPC().GetCPUName(), system.IsDualCoreMode() ? "DC" : "SC",
       g_video_backend->GetDisplayName(), Config::Get(Config::MAIN_DSP_HLE) ? "HLE" : "LLE");
 
-  std::string message = fmt::format("{} | {}", Common::GetScmRevStr(), SSettings);
+  std::string message = fmt::format("Dolphin RWiN | {}", SSettings);
   if (Config::Get(Config::MAIN_SHOW_ACTIVE_TITLE))
   {
     const std::string& title = SConfig::GetInstance().GetTitleDescription();

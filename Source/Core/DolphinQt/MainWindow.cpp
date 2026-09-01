@@ -43,7 +43,6 @@
 #include "Common/Logging/Log.h"
 #include "Common/PointerE2ETelemetry.h"
 #include "Common/ScopeGuard.h"
-#include "Common/Version.h"
 #include "Common/WindowSystemInfo.h"
 
 #include "Core/AchievementManager.h"
@@ -164,6 +163,11 @@ static void InstallSignalHandler()
 }
 #endif
 
+static QString GetProductWindowTitle()
+{
+  return QStringLiteral("Dolphin RWiN");
+}
+
 static WindowSystemType GetWindowSystemType()
 {
   // Determine WSI type based on Qt platform.
@@ -225,7 +229,7 @@ MainWindow::MainWindow(Core::System& system, std::unique_ptr<BootParameters> boo
 {
   setObjectName(QStringLiteral("dolphinMainWindow"));
   setAccessibleName(tr("Dolphin Main Window"));
-  setWindowTitle(QString::fromStdString(Common::GetScmRevStr()));
+  setWindowTitle(GetProductWindowTitle());
   setWindowIcon(Resources::GetAppIcon());
   setUnifiedTitleAndToolBarOnMac(true);
   setAcceptDrops(true);
@@ -1437,7 +1441,7 @@ void MainWindow::HideRenderWidget(bool reinit, bool is_exit)
     m_rendering_to_main = false;
     m_stack->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     disconnect(Host::GetInstance(), &Host::RequestTitle, this, &MainWindow::setWindowTitle);
-    setWindowTitle(QString::fromStdString(Common::GetScmRevStr()));
+    setWindowTitle(GetProductWindowTitle());
   }
 
   // The following code works around a driver bug that would lead to Dolphin crashing when changing

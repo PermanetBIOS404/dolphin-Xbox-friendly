@@ -53,6 +53,8 @@ jobs:
         run: |
           set -euxo pipefail
           cmake -S . -B Build -GNinja \
+            -DCMAKE_C_FLAGS:STRING="-ffile-prefix-map=${GITHUB_WORKSPACE}=Dolphin-RWiN" \
+            -DCMAKE_CXX_FLAGS:STRING="-ffile-prefix-map=${GITHUB_WORKSPACE}=Dolphin-RWiN" \
             -DLINUX_LOCAL_DEV=true \
             -DENABLE_ANALYTICS=OFF \
             -DENABLE_DISCORD_PRESENCE=OFF
@@ -67,13 +69,78 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          cp -r Data/Sys/ Build/Binaries/
-          touch Build/Binaries/portable.txt
-          tar -C Build -czf Dolphin-RWiN-Linux-Portable.tar.gz Binaries
+
+          package_name="Dolphin-RWiN-Linux-Portable"
+          staging_root="$(mktemp -d)"
+          package_dir="${staging_root}/${package_name}"
+
+          install -d -m 0755 "${package_dir}/docs"
+          install -m 0755 \
+            Build/Binaries/dolphin-emu \
+            Build/Binaries/dolphin-emu-nogui \
+            Build/Binaries/dolphin-tool \
+            "${package_dir}/"
+          cp -a Build/Binaries/Sys "${package_dir}/Sys"
+          install -m 0644 Build/Binaries/dolphin-rwin.png "${package_dir}/dolphin-rwin.png"
+          install -m 0755 Build/Binaries/install-desktop-launcher.sh \
+            "${package_dir}/install-desktop-launcher.sh"
+          install -m 0644 /dev/null "${package_dir}/portable.txt"
+
+          install -m 0644 COPYING README.md "${package_dir}/"
+          cp -a LICENSES "${package_dir}/LICENSES"
+          find "${package_dir}/LICENSES" -type d -exec chmod 0755 {} +
+          find "${package_dir}/LICENSES" -type f -exec chmod 0644 {} +
+          install -m 0644 docs/DolphinRWiNLinuxReleaseNotes.md "${package_dir}/docs/"
+
+          for forbidden_entry in user User Tests traversal_server; do
+            if [[ -e "${package_dir}/${forbidden_entry}" ]]; then
+              echo "Forbidden release entry found: ${forbidden_entry}" >&2
+              exit 1
+            fi
+          done
+
+          privacy_report="${staging_root}/privacy-matches.txt"
+          if grep -aRFl \
+            -e '/home/angelo' \
+            -e 'Jane404' \
+            -e 'VirtualWii' \
+            -e '/media/angelo' \
+            -e "${GITHUB_WORKSPACE}" \
+            -- "${package_dir}" > "${privacy_report}"; then
+            echo "Personal path or identifier found in staged release files:" >&2
+            cat "${privacy_report}" >&2
+            exit 1
+          else
+            privacy_status=$?
+            if [[ ${privacy_status} -ne 1 ]]; then
+              echo "Privacy audit failed with grep status ${privacy_status}." >&2
+              exit "${privacy_status}"
+            fi
+          fi
+
+          for executable in dolphin-emu dolphin-emu-nogui dolphin-tool; do
+            echo "::group::ldd ${executable}"
+            ldd "${package_dir}/${executable}" | tee "${staging_root}/ldd-${executable}.txt"
+            echo "::endgroup::"
+          done
+          if grep -H 'not found' "${staging_root}"/ldd-*.txt; then
+            echo "One or more staged executables have unresolved shared-library dependencies." >&2
+            exit 1
+          fi
+
+          tar -C "${staging_root}" \
+            -czf "${GITHUB_WORKSPACE}/${package_name}.tar.gz" \
+            "${package_name}"
+          (
+            cd "${GITHUB_WORKSPACE}"
+            sha256sum "${package_name}.tar.gz" > "${package_name}.tar.gz.sha256"
+          )
 
       - name: Upload portable bundle
         uses: actions/upload-artifact@v4
         with:
           name: Dolphin-RWiN-Linux-Portable
-          path: Dolphin-RWiN-Linux-Portable.tar.gz
+          path: |
+            Dolphin-RWiN-Linux-Portable.tar.gz
+            Dolphin-RWiN-Linux-Portable.tar.gz.sha256
           if-no-files-found: error

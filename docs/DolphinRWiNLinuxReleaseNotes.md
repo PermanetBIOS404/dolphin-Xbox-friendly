@@ -1,5 +1,7 @@
 # Dolphin RWiN — Linux Release
 
+> **Release status:** Linux release-candidate preparation is actively in progress. Final packaging, release audit, smoke testing, and GitHub release publication are still pending.
+
 > Draft release notes. No public release has been published yet.
 
 Dolphin RWiN is a fork of Dolphin Emulator. This first packaging target for the current Dolphin RWiN generation focuses on a portable Linux build and the Wii development and real-hardware workflows added by the fork.
@@ -12,7 +14,11 @@ Dolphin RWiN is a fork of Dolphin Emulator. This first packaging target for the 
 - Wii Export Assistant with USB Loader GX layout, validation, and rollback
 - direct ISO and RVZ to WBFS export
 - native Wii NKit v1 reconstruction
+- NKit v1 support for legitimate zero-length regular FST files
 - explicit USB Loader GX with d2x cIOS playable repair
+- Dolphin RWiN Linux launcher and menu artwork integration
+- desktop-launcher installer support
+- runtime application and window icon support for Linux local and portable builds
 - isolated Linux portable package
 
 ## NKit / d2x Notice
@@ -27,11 +33,13 @@ Use only game images you are legally entitled to use.
 
 ## Validation
 
-Current PC-side validation has established that:
+Current PC-side validation includes Wii Sports + Wii Sports Resort (SP2E01), a real, user-owned Wii NKit v1 source containing legitimate zero-length regular FST files. It:
 
-- a real, user-owned Wii NKit v1 source completed the reconstruction and WBFS export pipeline;
-- the generated WBFS reopened successfully through Dolphin; and
-- the resulting WBFS booted successfully in Dolphin.
+- completed NKit reconstruction;
+- completed playable d2x WBFS repair;
+- completed built-in exporter validation;
+- passed independent `dolphin-tool` verification with only expected, low-severity characteristics of the repaired WBFS; and
+- booted successfully in Dolphin.
 
 Real-Wii acceptance through USB Loader GX with d2x cIOS is still pending and is not claimed by this release draft.
 

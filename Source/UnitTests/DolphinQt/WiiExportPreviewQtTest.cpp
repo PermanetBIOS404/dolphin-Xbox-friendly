@@ -299,10 +299,61 @@ TEST(WiiExportPreviewQtTest, DestinationChangesRefreshPreviewAndCancelKeepsSelec
   EXPECT_EQ(dialog.GetPreviewState().destination->absolute_root, first_root);
   ASSERT_TRUE(dialog.SelectDestinationPath(second.path()));
   EXPECT_NE(dialog.GetPreviewState().destination->absolute_root, first_root);
-  EXPECT_EQ(dialog.findChild<QLineEdit*>(QStringLiteral("wiiExportDestinationPath"))->text(),
-            second.path());
+  auto* const destination_path =
+      dialog.findChild<QLineEdit*>(QStringLiteral("wiiExportDestinationPath"));
+  ASSERT_NE(destination_path, nullptr);
+  EXPECT_TRUE(destination_path->isReadOnly());
+  EXPECT_EQ(destination_path->text(), second.path());
+  EXPECT_EQ(destination_path->toolTip(), second.path());
   EXPECT_TRUE(DirectoryEntries(first.path()).empty());
   EXPECT_TRUE(DirectoryEntries(second.path()).empty());
+}
+
+TEST(WiiExportPreviewQtTest, LongPathsRemainAccessibleAtCompactDialogSize)
+{
+  GetTestApplication();
+  QTemporaryDir directory;
+  ASSERT_TRUE(directory.isValid());
+  const QString destination = directory.filePath(
+      QStringLiteral("a-very-long-destination-directory-name/another-long-directory-name"));
+  ASSERT_TRUE(QDir{}.mkpath(destination));
+
+  UICommon::WiiExportPreparedSource prepared = MakePreparedSource();
+  const QString source = QStringLiteral(
+      "/synthetic/a-very-long-source-directory-name/another-long-directory-name/"
+      "Wii Sports and Wii Sports Resort.nkit.iso");
+  prepared.source.source_path = source.toStdString();
+  prepared.source.display_title =
+      "A Very Long Wii Export Preview Game Title Used To Exercise Compact Path Presentation";
+
+  WiiExportPreviewDialog dialog(std::move(prepared));
+  ASSERT_TRUE(dialog.SelectDestinationPath(destination));
+  dialog.resize(dialog.minimumSize());
+  QApplication::processEvents();
+
+  auto* const source_path =
+      dialog.findChild<QLineEdit*>(QStringLiteral("wiiExportSourcePath"));
+  auto* const destination_path =
+      dialog.findChild<QLineEdit*>(QStringLiteral("wiiExportDestinationPath"));
+  auto* const planned_paths =
+      dialog.findChild<QListWidget*>(QStringLiteral("wiiExportPlannedPaths"));
+  ASSERT_NE(source_path, nullptr);
+  ASSERT_NE(destination_path, nullptr);
+  ASSERT_NE(planned_paths, nullptr);
+  EXPECT_TRUE(source_path->isReadOnly());
+  EXPECT_EQ(source_path->text(), source);
+  EXPECT_EQ(source_path->toolTip(), source);
+  EXPECT_EQ(destination_path->text(), destination);
+  EXPECT_EQ(destination_path->toolTip(), destination);
+  EXPECT_EQ(planned_paths->textElideMode(), Qt::ElideMiddle);
+  ASSERT_EQ(planned_paths->count(), static_cast<int>(dialog.GetPreviewState().plan.parts.size()));
+  for (int i = 0; i < planned_paths->count(); ++i)
+  {
+    const QString relative_path =
+        QString::fromStdString(dialog.GetPreviewState().plan.parts[i].relative_path);
+    EXPECT_EQ(planned_paths->item(i)->text(), relative_path);
+    EXPECT_EQ(planned_paths->item(i)->toolTip(), relative_path);
+  }
 }
 
 TEST(WiiExportPreviewQtTest, SplitPolicyAndDestinationUpdatesAreReactiveWithoutExport)
@@ -344,11 +395,14 @@ TEST(WiiExportPreviewQtTest, PlannedPathsAndStorageFactsAreRenderedInOrder)
   ASSERT_NE(paths, nullptr);
   ASSERT_NE(filesystem, nullptr);
   ASSERT_NE(status, nullptr);
+  EXPECT_EQ(paths->textElideMode(), Qt::ElideMiddle);
   ASSERT_EQ(paths->count(), static_cast<int>(dialog.GetPreviewState().plan.parts.size()));
   for (int i = 0; i < paths->count(); ++i)
   {
-    EXPECT_EQ(paths->item(i)->text(),
-              QString::fromStdString(dialog.GetPreviewState().plan.parts[i].relative_path));
+    const QString relative_path =
+        QString::fromStdString(dialog.GetPreviewState().plan.parts[i].relative_path);
+    EXPECT_EQ(paths->item(i)->text(), relative_path);
+    EXPECT_EQ(paths->item(i)->toolTip(), relative_path);
   }
   EXPECT_EQ(filesystem->text(),
             QString::fromStdString(dialog.GetPreviewState().destination->raw_filesystem_type));

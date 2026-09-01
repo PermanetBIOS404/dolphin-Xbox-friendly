@@ -15,7 +15,7 @@
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
-#include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QTemporaryDir>
 
@@ -385,9 +385,12 @@ TEST(WiiExportGameListPreviewQtTest, PreviewDialogShowsSourcePathAndCreatesNoOut
   WiiExportPreviewDialog dialog(*source.prepared_source);
   ASSERT_TRUE(dialog.SelectDestinationPath(destination.path()));
   auto* const source_path =
-      dialog.findChild<QLabel*>(QStringLiteral("wiiExportSourcePath"));
+      dialog.findChild<QLineEdit*>(QStringLiteral("wiiExportSourcePath"));
   ASSERT_NE(source_path, nullptr);
-  EXPECT_EQ(source_path->text(), QString::fromStdString(MakeEntry().source_path));
+  const QString expected_source_path = QString::fromStdString(MakeEntry().source_path);
+  EXPECT_TRUE(source_path->isReadOnly());
+  EXPECT_EQ(source_path->text(), expected_source_path);
+  EXPECT_EQ(source_path->toolTip(), expected_source_path);
   auto* const export_button =
       dialog.findChild<QPushButton*>(QStringLiteral("wiiExportButton"));
   ASSERT_NE(export_button, nullptr);

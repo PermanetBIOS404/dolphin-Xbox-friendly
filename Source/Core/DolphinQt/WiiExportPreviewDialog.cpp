@@ -18,6 +18,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QListWidgetItem>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QStringList>
@@ -161,10 +162,11 @@ WiiExportPreviewDialog::WiiExportPreviewDialog(
   auto* const source_layout = new QFormLayout(source_group);
   source_layout->addRow(tr("Title:"), new QLabel(QString::fromStdString(source.display_title)));
   source_layout->addRow(tr("ID6:"), new QLabel(QString::fromStdString(source.game_id)));
-  auto* const source_path = new QLabel(QString::fromStdString(source.source_path));
+  const QString source_path_text = QString::fromStdString(source.source_path);
+  auto* const source_path = new QLineEdit(source_path_text);
   source_path->setObjectName(QStringLiteral("wiiExportSourcePath"));
-  source_path->setTextInteractionFlags(Qt::TextSelectableByMouse);
-  source_path->setWordWrap(true);
+  source_path->setReadOnly(true);
+  source_path->setToolTip(source_path_text);
   source_layout->addRow(tr("Source path:"), source_path);
   const bool reconstructed_nkit =
       m_model.GetPreparedSource().recipe.kind ==
@@ -249,6 +251,7 @@ WiiExportPreviewDialog::WiiExportPreviewDialog(
   auto* const output_layout = new QVBoxLayout(output_group);
   m_planned_paths = new QListWidget;
   m_planned_paths->setObjectName(QStringLiteral("wiiExportPlannedPaths"));
+  m_planned_paths->setTextElideMode(Qt::ElideMiddle);
   output_layout->addWidget(m_planned_paths);
 
   auto* const status_group = new QGroupBox(tr("Status"));
@@ -347,7 +350,9 @@ void WiiExportPreviewDialog::UpdatePresentation()
       state.nkit_hash_policy == UICommon::WiiExportNKitHashPolicy::D2xPlayableRegeneratedHierarchy);
   if (state.destination)
   {
-    m_destination_path->setText(QString::fromStdString(state.destination->selected_path));
+    const QString destination_path = QString::fromStdString(state.destination->selected_path);
+    m_destination_path->setText(destination_path);
+    m_destination_path->setToolTip(destination_path);
     m_filesystem->setText(state.destination->raw_filesystem_type.empty() ?
                               tr("Unknown") :
                               QString::fromStdString(state.destination->raw_filesystem_type));
@@ -361,7 +366,11 @@ void WiiExportPreviewDialog::UpdatePresentation()
 
   m_planned_paths->clear();
   for (const UICommon::WiiExportPart& part : state.plan.parts)
-    m_planned_paths->addItem(QString::fromStdString(part.relative_path));
+  {
+    const QString relative_path = QString::fromStdString(part.relative_path);
+    auto* const item = new QListWidgetItem(relative_path, m_planned_paths);
+    item->setToolTip(relative_path);
+  }
 
   if (state.plan.parts.empty())
   {
