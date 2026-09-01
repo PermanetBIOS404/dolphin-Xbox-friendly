@@ -1011,6 +1011,230 @@ SyntheticN4NKitFixture BuildSyntheticN4NKitFixture(
   return fixture;
 }
 
+struct ZeroFileTestFile
+{
+  std::string_view name;
+  u64 reconstructed_offset;
+  std::span<const u8> contents;
+};
+
+struct SyntheticZeroFileFixture
+{
+  SyntheticN4ConventionalDisc conventional;
+  SyntheticN4NKitFixture compact;
+  std::vector<u64> compacted_offsets;
+  std::vector<u64> reconstructed_offsets;
+  std::vector<u32> zero_entries;
+};
+
+SyntheticZeroFileFixture
+BuildSyntheticZeroFileFixture(std::span<const ZeroFileTestFile> files)
+{
+  SyntheticZeroFileFixture result;
+  result.conventional = BuildSyntheticN4ConventionalDisc();
+  std::span<u8> decrypted(
+      reinterpret_cast<u8*>(result.conventional.decrypted_blocks.data()),
+      static_cast<size_t>(result.conventional.decrypted_size));
+  std::fill(decrypted.begin() + FST_OFFSET, decrypted.end(), 0);
+
+  std::vector<u8> names;
+  std::vector<u32> name_offsets;
+  name_offsets.reserve(files.size());
+  for (const ZeroFileTestFile& file : files)
+  {
+    EXPECT_FALSE(file.name.empty());
+    EXPECT_LE(names.size(), 0xffffffu);
+    name_offsets.emplace_back(static_cast<u32>(names.size()));
+    names.insert(names.end(), file.name.begin(), file.name.end());
+    names.emplace_back(0);
+  }
+
+  const u32 entry_count = static_cast<u32>(files.size() + 1);
+  const u64 entry_bytes = static_cast<u64>(entry_count) * 12;
+  const u64 fst_size =
+      Common::AlignUp(entry_bytes + static_cast<u64>(names.size()), 4ull);
+  const u64 fst_end = FST_OFFSET + fst_size;
+  WriteBigEndianU32(decrypted, 0x428, static_cast<u32>(fst_size / 4));
+  SetO3DirectoryEntry(decrypted, 0, 0, 0, entry_count);
+  result.reconstructed_offsets.resize(entry_count);
+  for (size_t i = 0; i < files.size(); ++i)
+  {
+    const ZeroFileTestFile& file = files[i];
+    const u32 entry = static_cast<u32>(i + 1);
+    EXPECT_EQ(file.reconstructed_offset % 4, 0u);
+    EXPECT_LE(file.contents.size(), std::numeric_limits<u32>::max());
+    SetN4FileEntry(decrypted, entry, name_offsets[i], file.reconstructed_offset,
+                   static_cast<u32>(file.contents.size()));
+    result.reconstructed_offsets[entry] = file.reconstructed_offset;
+    if (file.contents.empty())
+      result.zero_entries.emplace_back(entry);
+  }
+  std::copy(names.begin(), names.end(), decrypted.begin() + FST_OFFSET + entry_bytes);
+
+  std::vector<u32> physical_order;
+  physical_order.reserve(files.size());
+  for (u32 entry = 1; entry < entry_count; ++entry)
+    physical_order.emplace_back(entry);
+  std::ranges::sort(physical_order, [&](u32 lhs, u32 rhs) {
+    const ZeroFileTestFile& lhs_file = files[lhs - 1];
+    const ZeroFileTestFile& rhs_file = files[rhs - 1];
+    if (lhs_file.reconstructed_offset != rhs_file.reconstructed_offset)
+      return lhs_file.reconstructed_offset < rhs_file.reconstructed_offset;
+    if (lhs_file.contents.size() != rhs_file.contents.size())
+      return lhs_file.contents.size() < rhs_file.contents.size();
+    return lhs < rhs;
+  });
+
+  u64 reconstructed_cursor = fst_end;
+  for (size_t physical_index = 0; physical_index < physical_order.size(); ++physical_index)
+  {
+    const u32 entry = physical_order[physical_index];
+    const ZeroFileTestFile& file = files[entry - 1];
+    EXPECT_GE(file.reconstructed_offset, reconstructed_cursor);
+    if (file.reconstructed_offset > reconstructed_cursor)
+    {
+      const u64 gap_length = file.reconstructed_offset - reconstructed_cursor;
+      GenerateJunk(N4_PARTITION_ID, 0, result.conventional.decrypted_size,
+                   reconstructed_cursor,
+                   decrypted.subspan(static_cast<size_t>(reconstructed_cursor),
+                                     static_cast<size_t>(gap_length)));
+      if (physical_index == 0 || gap_length < 0x40000)
+      {
+        std::fill_n(decrypted.begin() + reconstructed_cursor,
+                    static_cast<size_t>(std::min<u64>(0x1c, gap_length)), 0);
+      }
+    }
+    std::copy(file.contents.begin(), file.contents.end(),
+              decrypted.begin() + file.reconstructed_offset);
+    reconstructed_cursor =
+        file.reconstructed_offset + Common::AlignUp(file.contents.size(), size_t{4});
+  }
+  EXPECT_LE(reconstructed_cursor, result.conventional.decrypted_size);
+  RefreshSyntheticN4PartitionCrypto(&result.conventional);
+
+  SyntheticN4NKitFixture& fixture = result.compact;
+  fixture.raw_partition_size = result.conventional.raw_partition_size;
+  fixture.decrypted_size = result.conventional.decrypted_size;
+  fixture.partition_end = result.conventional.partition_end;
+  fixture.bytes =
+      std::make_shared<std::vector<u8>>(SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE);
+  std::vector<u8>& source = *fixture.bytes;
+  EXPECT_TRUE(result.conventional.MakeReader()->Read(0, WII_NKIT_V1_HEADER_SIZE, source.data()));
+  source[0x60] = 1;
+  source[0x61] = 1;
+  std::copy_n("NKIT v01", 8, source.begin() + 0x200);
+  WriteBigEndianU32(source, 0x208, 0x5a45524f);
+  WriteBigEndianU32(source, 0x20c, 0x46494c45);
+  WriteBigEndianU32(source, 0x210, static_cast<u32>(SL_DVD_SIZE / 4));
+  std::copy(N4_PARTITION_ID.begin(), N4_PARTITION_ID.end(), source.begin() + 0x214);
+  WriteBigEndianU32(source, 0x218, 0);
+  WriteBigEndianU32(source, 0x40020, static_cast<u32>(SOURCE_PARTITION_OFFSET / 4));
+
+  const std::vector<u8> prefix_gap = EncodeExplicitMixedGap(
+      ORIGINAL_PARTITION_OFFSET - WII_NKIT_V1_HEADER_SIZE,
+      std::span<const u8>(*result.conventional.stored_bytes)
+          .subspan(WII_NKIT_V1_HEADER_SIZE + 0x200, 0x100));
+  std::copy(prefix_gap.begin(), prefix_gap.end(), source.begin() + WII_NKIT_V1_HEADER_SIZE);
+  EXPECT_TRUE(result.conventional.MakeReader()->Read(
+      ORIGINAL_PARTITION_OFFSET, PARTITION_HEADER_SIZE,
+      source.data() + SOURCE_PARTITION_OFFSET));
+
+  const std::span<const u8> conventional_decrypted(
+      reinterpret_cast<const u8*>(result.conventional.decrypted_blocks.data()),
+      static_cast<size_t>(result.conventional.decrypted_size));
+  std::vector<u8> payload(conventional_decrypted.begin(),
+                          conventional_decrypted.begin() + fst_end);
+  std::copy_n("NKIT v01", 8, payload.begin() + 0x200);
+  WriteBigEndianU32(payload, 0x210,
+                    static_cast<u32>(result.conventional.raw_partition_size / 4));
+  fixture.fst_offset = FST_OFFSET;
+  fixture.flags_offset = payload.size();
+  payload.resize(payload.size() + 4, 0);
+
+  result.compacted_offsets.resize(entry_count);
+  reconstructed_cursor = fst_end;
+  for (u32 entry : physical_order)
+  {
+    const ZeroFileTestFile& file = files[entry - 1];
+    EXPECT_GE(file.reconstructed_offset, reconstructed_cursor);
+    if (file.reconstructed_offset > reconstructed_cursor)
+    {
+      const std::vector<u8> encoded_gap =
+          EncodeN4AllJunkGap(file.reconstructed_offset - reconstructed_cursor);
+      payload.insert(payload.end(), encoded_gap.begin(), encoded_gap.end());
+    }
+    EXPECT_EQ(payload.size() % 4, 0u);
+    result.compacted_offsets[entry] = payload.size();
+    WriteBigEndianU32(payload, FST_OFFSET + static_cast<u64>(entry) * 12 + 4,
+                      static_cast<u32>(payload.size() / 4));
+    const size_t aligned_size = Common::AlignUp(file.contents.size(), size_t{4});
+    payload.insert(payload.end(),
+                   conventional_decrypted.begin() + file.reconstructed_offset,
+                   conventional_decrypted.begin() + file.reconstructed_offset + aligned_size);
+    reconstructed_cursor = file.reconstructed_offset + aligned_size;
+  }
+
+  fixture.partition_tail_source_offset = payload.size();
+  const std::vector<u8> partition_tail =
+      EncodeFillGap(result.conventional.decrypted_size - reconstructed_cursor);
+  payload.insert(payload.end(), partition_tail.begin(), partition_tail.end());
+  const std::vector<u8> disc_tail =
+      EncodeFillGap(SL_DVD_SIZE - result.conventional.partition_end);
+  payload.insert(payload.end(), disc_tail.begin(), disc_tail.end());
+  payload.resize(Common::AlignUp(payload.size(), static_cast<size_t>(0x8000)), 0);
+
+  WriteBigEndianU32(source, SOURCE_PARTITION_OFFSET + 0x2bc,
+                    static_cast<u32>(payload.size() / 4));
+  source.resize(SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE + payload.size());
+  std::copy(payload.begin(), payload.end(),
+            source.begin() + SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE);
+  return result;
+}
+
+void ExpectZeroFileFixtureMatchesOracle(const SyntheticZeroFileFixture& fixture)
+{
+  auto created = TryCreateWiiNKitV1ReconstructedReader(fixture.compact.MakeReader());
+  ASSERT_TRUE(created.has_value());
+  NKitV1ReconstructedBlobReader& reader = **created;
+  const NKitV1SequentialPartition& partition = reader.GetIndex().GetPlan().GetPartition();
+
+  u64 coverage_cursor = 0;
+  for (const NKitV1SequentialSpan& span : partition.GetDecryptedSpans())
+  {
+    EXPECT_NE(span.GetLength(), 0u);
+    EXPECT_EQ(span.GetReconstructedOffset(), coverage_cursor);
+    coverage_cursor += span.GetLength();
+  }
+  EXPECT_EQ(coverage_cursor, fixture.conventional.decrypted_size);
+
+  const auto& patches = partition.GetFstOffsetPatches();
+  for (u32 entry : fixture.zero_entries)
+  {
+    ASSERT_LT(entry, partition.GetFstEntries().size());
+    EXPECT_FALSE(partition.GetFstEntries()[entry].IsDirectory());
+    EXPECT_EQ(partition.GetFstEntries()[entry].GetFileSize(), 0u);
+    const auto patch = std::ranges::find_if(patches, [entry](const NKitV1FstOffsetPatch& value) {
+      return value.GetFieldOffset() == FST_OFFSET + static_cast<u64>(entry) * 12 + 4;
+    });
+    ASSERT_NE(patch, patches.end());
+    EXPECT_EQ(patch->GetReconstructedFileOffset(), fixture.reconstructed_offsets[entry]);
+  }
+
+  std::unique_ptr<BlobReader> oracle = fixture.conventional.MakeReader();
+  constexpr size_t chunk_size = 64 * 1024;
+  std::vector<u8> expected(chunk_size);
+  std::vector<u8> actual(chunk_size);
+  const u64 raw_data_offset = ORIGINAL_PARTITION_OFFSET + PARTITION_HEADER_SIZE;
+  for (u64 offset = 0; offset < fixture.conventional.raw_partition_size; offset += chunk_size)
+  {
+    const size_t size = static_cast<size_t>(
+        std::min<u64>(chunk_size, fixture.conventional.raw_partition_size - offset));
+    ASSERT_TRUE(oracle->Read(raw_data_offset + offset, size, expected.data()));
+    ASSERT_TRUE(reader.Read(raw_data_offset + offset, size, actual.data()));
+    EXPECT_TRUE(std::equal(expected.begin(), expected.begin() + size, actual.begin()));
+  }
+}
+
 // Test-only encoder for the nested fixture. It follows the canonical NKit-v1 physical-file rule:
 // directories are retained in the FST but consume no stream bytes, while regular files are
 // compacted in original physical-offset order and their FST offset words are independently
@@ -1993,15 +2217,15 @@ TEST_F(NKitV1RandomAccessTest, CanonicalGapContextsAndConservativeRejectionsAreE
   EXPECT_FALSE(std::all_of(internal.begin(), internal.begin() + 0x1c,
                            [](u8 byte) { return byte == 0; }));
 
-  SyntheticN4NKitFixture unsupported = s_nkit;
-  unsupported.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
-  WriteBigEndianU32(*unsupported.bytes,
+  SyntheticN4NKitFixture populated_file_relabelled_empty = s_nkit;
+  populated_file_relabelled_empty.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
+  WriteBigEndianU32(*populated_file_relabelled_empty.bytes,
                     SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE + FST_OFFSET + 2 * 12 + 8,
                     0);
-  auto unsupported_result =
-      TryCreateWiiNKitV1ReconstructedReader(unsupported.MakeReader());
-  ASSERT_FALSE(unsupported_result.has_value());
-  EXPECT_EQ(unsupported_result.error().code, NKitV1ErrorCode::UnsupportedGapContext);
+  auto populated_file_result =
+      TryCreateWiiNKitV1ReconstructedReader(populated_file_relabelled_empty.MakeReader());
+  ASSERT_FALSE(populated_file_result.has_value());
+  EXPECT_EQ(populated_file_result.error().code, NKitV1ErrorCode::InvalidRange);
 
   SyntheticN4NKitFixture malformed_directory = s_nkit;
   malformed_directory.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
@@ -2426,6 +2650,140 @@ TEST_F(NKitV1RandomAccessTest,
   ASSERT_FALSE(cancelled.has_value());
   EXPECT_EQ(cancelled.error().error.code, NKitV1ErrorCode::Cancelled);
   EXPECT_GE(cancellation_checks, 2);
+}
+
+TEST_F(NKitV1RandomAccessTest, ZeroLengthSingleFileMatchesConventionalOracle)
+{
+  const u64 after_a = N4_FILE_A_OFFSET + Common::AlignUp(N4_FILE_A.size(), size_t{4});
+  const std::array files = {
+      ZeroFileTestFile{"charlie.bin", N4_FILE_C_OFFSET, std::span<const u8>(N4_FILE_C)},
+      ZeroFileTestFile{"empty.bin", after_a, {}},
+      ZeroFileTestFile{"alpha.bin", N4_FILE_A_OFFSET, std::span<const u8>(N4_FILE_A)},
+      ZeroFileTestFile{"beta.bin", after_a + 4, std::span<const u8>(N4_FILE_B)},
+  };
+  const SyntheticZeroFileFixture fixture = BuildSyntheticZeroFileFixture(files);
+  ExpectZeroFileFixtureMatchesOracle(fixture);
+}
+
+TEST_F(NKitV1RandomAccessTest, ZeroLengthConsecutiveFilesAdvanceAcrossFourByteGaps)
+{
+  const u64 after_a = N4_FILE_A_OFFSET + Common::AlignUp(N4_FILE_A.size(), size_t{4});
+  const std::array files = {
+      ZeroFileTestFile{"charlie.bin", N4_FILE_C_OFFSET, std::span<const u8>(N4_FILE_C)},
+      ZeroFileTestFile{"COPYDATE_CODE", after_a, {}},
+      ZeroFileTestFile{"COPYDATE_DATA", after_a + 4, {}},
+      ZeroFileTestFile{"COPYDATE_LAST", after_a + 8, {}},
+      ZeroFileTestFile{"alpha.bin", N4_FILE_A_OFFSET, std::span<const u8>(N4_FILE_A)},
+      ZeroFileTestFile{"beta.bin", after_a + 12, std::span<const u8>(N4_FILE_B)},
+  };
+  const SyntheticZeroFileFixture fixture = BuildSyntheticZeroFileFixture(files);
+  ExpectZeroFileFixtureMatchesOracle(fixture);
+
+  auto created = TryCreateWiiNKitV1ReconstructedReader(fixture.compact.MakeReader());
+  ASSERT_TRUE(created.has_value());
+  const auto& patches = (*created)->GetIndex().GetPlan().GetPartition().GetFstOffsetPatches();
+  for (u32 entry = 2; entry <= 4; ++entry)
+  {
+    const auto patch = std::ranges::find_if(patches, [entry](const NKitV1FstOffsetPatch& value) {
+      return value.GetFieldOffset() == FST_OFFSET + static_cast<u64>(entry) * 12 + 4;
+    });
+    ASSERT_NE(patch, patches.end());
+    EXPECT_EQ(patch->GetReconstructedFileOffset(), after_a + (entry - 2) * 4);
+  }
+}
+
+TEST_F(NKitV1RandomAccessTest, ZeroLengthSharedOffsetsRemainDeterministic)
+{
+  const u64 after_a = N4_FILE_A_OFFSET + Common::AlignUp(N4_FILE_A.size(), size_t{4});
+  const std::array files = {
+      ZeroFileTestFile{"charlie.bin", N4_FILE_C_OFFSET, std::span<const u8>(N4_FILE_C)},
+      ZeroFileTestFile{"empty-first.bin", after_a, {}},
+      ZeroFileTestFile{"empty-second.bin", after_a, {}},
+      ZeroFileTestFile{"alpha.bin", N4_FILE_A_OFFSET, std::span<const u8>(N4_FILE_A)},
+      ZeroFileTestFile{"beta.bin", after_a, std::span<const u8>(N4_FILE_B)},
+  };
+  const SyntheticZeroFileFixture fixture = BuildSyntheticZeroFileFixture(files);
+  ExpectZeroFileFixtureMatchesOracle(fixture);
+  EXPECT_EQ(fixture.compacted_offsets[2], fixture.compacted_offsets[3]);
+  EXPECT_EQ(fixture.compacted_offsets[3], fixture.compacted_offsets[5]);
+}
+
+TEST_F(NKitV1RandomAccessTest, ZeroLengthFirstFilePreservesLargeInternalGapClassification)
+{
+  constexpr u64 zero_offset = 0x10000;
+  constexpr u64 alpha_offset = zero_offset + 0x40000;
+  const std::array files = {
+      ZeroFileTestFile{"charlie.bin", N4_FILE_C_OFFSET, std::span<const u8>(N4_FILE_C)},
+      ZeroFileTestFile{"alpha.bin", alpha_offset, std::span<const u8>(N4_FILE_A)},
+      ZeroFileTestFile{"first-empty.bin", zero_offset, {}},
+  };
+  const SyntheticZeroFileFixture fixture = BuildSyntheticZeroFileFixture(files);
+  ExpectZeroFileFixtureMatchesOracle(fixture);
+}
+
+TEST_F(NKitV1RandomAccessTest, ZeroLengthFinalFileLeavesPartitionTailCoverageExact)
+{
+  const u64 after_a = N4_FILE_A_OFFSET + Common::AlignUp(N4_FILE_A.size(), size_t{4});
+  const std::array files = {
+      ZeroFileTestFile{"final-empty.bin", after_a, {}},
+      ZeroFileTestFile{"alpha.bin", N4_FILE_A_OFFSET, std::span<const u8>(N4_FILE_A)},
+  };
+  const SyntheticZeroFileFixture fixture = BuildSyntheticZeroFileFixture(files);
+  ExpectZeroFileFixtureMatchesOracle(fixture);
+}
+
+TEST_F(NKitV1RandomAccessTest, ZeroLengthMalformedLayoutsRemainRejected)
+{
+  const u64 after_a = N4_FILE_A_OFFSET + Common::AlignUp(N4_FILE_A.size(), size_t{4});
+  const std::array files = {
+      ZeroFileTestFile{"charlie.bin", N4_FILE_C_OFFSET, std::span<const u8>(N4_FILE_C)},
+      ZeroFileTestFile{"empty-first.bin", after_a, {}},
+      ZeroFileTestFile{"empty-second.bin", after_a + 4, {}},
+      ZeroFileTestFile{"alpha.bin", N4_FILE_A_OFFSET, std::span<const u8>(N4_FILE_A)},
+      ZeroFileTestFile{"beta.bin", after_a + 8, std::span<const u8>(N4_FILE_B)},
+  };
+  const SyntheticZeroFileFixture valid = BuildSyntheticZeroFileFixture(files);
+  const u64 payload = SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE;
+  const auto expect_error = [](const SyntheticN4NKitFixture& fixture,
+                               NKitV1ErrorCode expected) {
+    auto created = TryCreateWiiNKitV1ReconstructedReader(fixture.MakeReader());
+    ASSERT_FALSE(created.has_value());
+    EXPECT_EQ(created.error().code, expected);
+  };
+
+  SyntheticN4NKitFixture inside_file = valid.compact;
+  inside_file.bytes = std::make_shared<std::vector<u8>>(*valid.compact.bytes);
+  WriteBigEndianU32(*inside_file.bytes, payload + FST_OFFSET + 2 * 12 + 4,
+                    static_cast<u32>((valid.compacted_offsets[4] + 4) / 4));
+  expect_error(inside_file, NKitV1ErrorCode::InvalidSequentialLayout);
+
+  SyntheticN4NKitFixture malformed_gap = valid.compact;
+  malformed_gap.bytes = std::make_shared<std::vector<u8>>(*valid.compact.bytes);
+  WriteBigEndianU32(*malformed_gap.bytes, payload + valid.compacted_offsets[2], 2);
+  expect_error(malformed_gap, NKitV1ErrorCode::MalformedGapRecord);
+
+  SyntheticN4NKitFixture nonzero_padding = valid.compact;
+  nonzero_padding.bytes = std::make_shared<std::vector<u8>>(*valid.compact.bytes);
+  WriteBigEndianU32(*nonzero_padding.bytes, payload + FST_OFFSET + 5 * 12 + 4,
+                    static_cast<u32>((valid.compacted_offsets[5] + 4) / 4));
+  expect_error(nonzero_padding, NKitV1ErrorCode::InvalidSequentialLayout);
+
+  SyntheticN4NKitFixture beyond_stored_data = valid.compact;
+  beyond_stored_data.bytes = std::make_shared<std::vector<u8>>(*valid.compact.bytes);
+  WriteBigEndianU32(*beyond_stored_data.bytes, payload + FST_OFFSET + 3 * 12 + 4, 0xffffffff);
+  expect_error(beyond_stored_data, NKitV1ErrorCode::InvalidRange);
+
+  const std::array tail_files = {
+      ZeroFileTestFile{"final-empty.bin", after_a, {}},
+      ZeroFileTestFile{"alpha.bin", N4_FILE_A_OFFSET, std::span<const u8>(N4_FILE_A)},
+  };
+  const SyntheticZeroFileFixture valid_tail = BuildSyntheticZeroFileFixture(tail_files);
+  SyntheticN4NKitFixture invalid_tail = valid_tail.compact;
+  invalid_tail.bytes = std::make_shared<std::vector<u8>>(*valid_tail.compact.bytes);
+  WriteBigEndianU32(*invalid_tail.bytes,
+                    payload + valid_tail.compact.partition_tail_source_offset, 2);
+  expect_error(invalid_tail, NKitV1ErrorCode::MalformedGapRecord);
+
 }
 
 TEST_F(NKitV1RandomAccessTest,
@@ -3180,9 +3538,15 @@ TEST_F(NKitV1RandomAccessTest, N5BlockedSupportMatrixReturnsSpecificTypedReasons
 
   SyntheticN4NKitFixture gap = s_nkit;
   gap.bytes = std::make_shared<std::vector<u8>>(*s_nkit.bytes);
-  WriteBigEndianU32(*gap.bytes,
-                    SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE + FST_OFFSET + 2 * 12 + 8,
-                    0);
+  const u64 payload = SOURCE_PARTITION_OFFSET + PARTITION_HEADER_SIZE;
+  const u64 gap_start = payload + gap.flags_offset + 4;
+  const u64 gap_end = payload + gap.file_a_source_offset;
+  ASSERT_GT(gap_end - gap_start, 12u);
+  std::fill(gap.bytes->begin() + gap_start, gap.bytes->begin() + gap_end, 0);
+  WriteBigEndianU32(*gap.bytes, gap_start, 3);
+  WriteBigEndianU32(*gap.bytes, gap_start + 4, 0);
+  WriteBigEndianU32(*gap.bytes, gap_start + 8,
+                    static_cast<u32>(N4_FILE_A_OFFSET - FST_OFFSET - N4_FST_SIZE) | 1);
   expect(std::move(gap), DolphinQt::WiiExportNKitV1Support::UnsupportedGapContext);
 
   SyntheticN4NKitFixture hash = s_nkit;

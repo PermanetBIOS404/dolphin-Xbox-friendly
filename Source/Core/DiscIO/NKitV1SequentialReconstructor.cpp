@@ -814,12 +814,6 @@ BuildWiiNKitV1SequentialReconstructionPlan(
                                  source_partition.GetSourceDataOffset() + fst_offset,
                                  partition_index));
   }
-  if (std::ranges::any_of(files, [](const FstFile& file) { return file.size == 0; }))
-  {
-    return std::unexpected(Error(NKitV1ErrorCode::UnsupportedGapContext,
-                                 source_partition.GetSourceDataOffset() + fst_offset,
-                                 partition_index));
-  }
   std::ranges::sort(files, [](const FstFile& lhs, const FstFile& rhs) {
     if (lhs.compacted_offset != rhs.compacted_offset)
       return lhs.compacted_offset < rhs.compacted_offset;
@@ -988,13 +982,16 @@ BuildWiiNKitV1SequentialReconstructionPlan(
                                    source_partition.GetSourceDataOffset() + file.compacted_offset,
                                    partition_index));
     }
-    NKitV1SequentialSpan file_span;
-    file_span.m_address_space = NKitV1GapAddressSpace::PartitionDecryptedData;
-    file_span.m_reconstructed_offset = reconstructed_cursor;
-    file_span.m_length = file.aligned_size;
-    file_span.m_kind = NKitV1SequentialSpanKind::Source;
-    file_span.m_source_offset = source_partition.GetSourceDataOffset() + file.compacted_offset;
-    partition.m_decrypted_spans.emplace_back(std::move(file_span));
+    if (file.aligned_size != 0)
+    {
+      NKitV1SequentialSpan file_span;
+      file_span.m_address_space = NKitV1GapAddressSpace::PartitionDecryptedData;
+      file_span.m_reconstructed_offset = reconstructed_cursor;
+      file_span.m_length = file.aligned_size;
+      file_span.m_kind = NKitV1SequentialSpanKind::Source;
+      file_span.m_source_offset = source_partition.GetSourceDataOffset() + file.compacted_offset;
+      partition.m_decrypted_spans.emplace_back(std::move(file_span));
+    }
     source_cursor = compacted_end;
     reconstructed_cursor = reconstructed_end;
   }

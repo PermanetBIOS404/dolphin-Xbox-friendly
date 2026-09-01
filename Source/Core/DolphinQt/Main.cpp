@@ -180,6 +180,7 @@ int main(int argc, char* argv[])
   UICommon::CreateDirectories();
   UICommon::Init();
   Resources::Init();
+  app.setWindowIcon(Resources::GetAppIcon());
   Settings::Instance().SetBatchModeEnabled(options.is_set("batch"));
 
   // Hook up alerts from core

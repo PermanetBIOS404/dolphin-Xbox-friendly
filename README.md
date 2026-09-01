@@ -222,11 +222,40 @@ cmake -S . -B Build -GNinja \
 
 cmake --build Build --parallel
 
-cp -r Data/Sys/ Build/Binaries/
 touch Build/Binaries/portable.txt
 ```
 
+With `LINUX_LOCAL_DEV=true`, the build automatically copies `Data/Sys` to `Build/Binaries/Sys`, beside the `dolphin-emu` executable. It also produces the launcher artwork at `Build/Binaries/dolphin-rwin.png` and an installer at `Build/Binaries/install-desktop-launcher.sh`. The `portable.txt` step remains necessary for the portable-package workflow.
+
+Run `./Build/Binaries/install-desktop-launcher.sh` to create or update the per-user Dolphin RWiN launcher; no `sudo` is required. This configures the launcher/menu shortcut artwork and is separate from the running-window icon mechanism described below. The launcher uses absolute paths to the current extracted or build directory, so rerun the installer after moving the whole directory.
+
 Lower build parallelism may be useful on resource-constrained machines, but it is not a Dolphin RWiN release requirement.
+
+### Linux Generic Gear / Missing Window Icon
+
+On Linux, the desktop or menu shortcut can show its configured icon while the running Dolphin window and taskbar entry show a generic gear. The launcher icon and the running window icon are separate.
+
+Dolphin RWiN now handles the runtime icon automatically: it assigns `Resources::GetAppIcon()` to the `QApplication`, using the existing Dolphin application logo, and local-development builds place the required `Sys` resources beside the executable. Users running a current Dolphin RWiN build should not need to copy resources or configure the window icon manually. This validates the runtime icon mechanism; custom Dolphin RWiN artwork will be handled separately.
+
+To diagnose an older or incorrectly packaged build, find the top-level Dolphin window:
+
+```sh
+wmctrl -lx | grep -i dolphin
+```
+
+Then inspect the returned window ID:
+
+```sh
+xprop -id <WINDOW_ID> WM_CLASS _NET_WM_NAME _NET_WM_ICON
+```
+
+The affected window reported `WM_CLASS` as `"dolphin-emu", "dolphin-emu"` and included `_NET_WM_ICON: not found.` For an older or mispackaged `LINUX_LOCAL_DEV` build, the expected runtime icon resource is:
+
+```text
+Build/Binaries/Sys/Resources/dolphin_logo.png
+```
+
+The preferred permanent fix is to rebuild from current Dolphin RWiN so the CMake post-build rule supplies `Build/Binaries/Sys` automatically. For an old local build only, ensuring that `Data/Sys` is present beside the executable as `Sys` can be used as a temporary diagnostic workaround; it is not the current build behavior.
 
 ## Windows
 

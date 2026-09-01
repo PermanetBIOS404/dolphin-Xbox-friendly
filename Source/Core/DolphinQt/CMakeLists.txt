@@ -509,6 +509,25 @@ if (MSVC)
   target_compile_options(dolphin-emu PRIVATE "/GR")
 endif()
 
+# LINUX_LOCAL_DEV resolves the Sys directory relative to the dolphin-emu executable.
+# Keep the runtime resources and launcher files beside the local binary.
+if(LINUX_LOCAL_DEV)
+  add_custom_command(TARGET dolphin-emu POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E remove_directory "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Sys"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/Data/Sys"
+            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Sys"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/Data/dolphin-rwin.png"
+            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/dolphin-rwin.png"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/Data/install-desktop-launcher.sh"
+            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/install-desktop-launcher.sh"
+    COMMAND chmod 0755 "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/install-desktop-launcher.sh"
+    VERBATIM
+  )
+endif()
+
 if(WIN32)
   target_sources(dolphin-emu PRIVATE DolphinQt.manifest DolphinQt.rc)
 
