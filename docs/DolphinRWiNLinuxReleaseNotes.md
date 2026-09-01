@@ -1,6 +1,6 @@
 # Dolphin RWiN — Linux Release
 
-> **Release status:** Linux release-candidate preparation is actively in progress. Final packaging, release audit, smoke testing, and GitHub release publication are still pending.
+> **Release status:** The GitHub-built Linux release candidate has completed packaging, release audit, and target-laptop portability smoke testing. GitHub release publication is still pending.
 
 > Draft release notes. No public release has been published yet.
 
@@ -40,6 +40,28 @@ Current PC-side validation includes Wii Sports + Wii Sports Resort (SP2E01), a r
 - completed built-in exporter validation;
 - passed independent `dolphin-tool` verification with only expected, low-severity characteristics of the repaired WBFS; and
 - booted successfully in Dolphin.
+
+### GitHub-built Linux portable candidate
+
+GitHub Actions Linux run `33470341807` successfully built commit `c36b9e287807c294d25206be7e909e6752afb4f3`. Configure, build, portable packaging, privacy audit, shared-library dependency audit, checksum generation, and artifact upload all passed.
+
+The public Linux release configuration uses `-DENABLE_LLVM=OFF`. LLVM integration provides optional disassembler functionality; it is not an emulator requirement. Leaving it enabled caused an earlier GitHub artifact to depend on the runner-specific `libLLVM-17.so.1`, so it is disabled for the portable release rather than imposing that library version on users.
+
+The corrected artifact was downloaded and tested on the target Linux Mint laptop. Its archive SHA-256 is:
+
+```text
+27a94ad0dbbd0611abf6e78e4182aa69bbdbb93989bbb85246475b3d153d4354
+```
+
+On the target laptop:
+
+- `dolphin-emu`, `dolphin-emu-nogui`, and `dolphin-tool` each had zero missing shared libraries;
+- none of the three executables retained an LLVM shared-library dependency;
+- the corrected GitHub-built `dolphin-emu` launched successfully;
+- the build was installed at `~/.local/share/Dolphin-RWiN/releases/c36b9e2878/`;
+- the desktop/application launcher was updated to that build and launched successfully;
+- existing standard Dolphin configuration and profile data continued to work; and
+- the separate Dolphin RWiN VirtualWii profile remained untouched.
 
 Real-Wii acceptance through USB Loader GX with d2x cIOS is still pending and is not claimed by this release draft.
 
