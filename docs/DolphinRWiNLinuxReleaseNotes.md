@@ -61,7 +61,7 @@ On the target laptop:
 - the build was installed at `~/.local/share/Dolphin-RWiN/releases/c36b9e2878/`;
 - the desktop/application launcher was updated to that build and launched successfully;
 - existing standard Dolphin configuration and profile data continued to work; and
-- the separate Dolphin RWiN VirtualWii profile remained untouched.
+- the separate Dolphin RWiN virtual Wii profile remained untouched.
 
 Physical-Wii acceptance through USB Loader GX with d2x cIOS has now passed for the tested title, Wii Sports + Wii Sports Resort (SP2E01). The WBFS produced by Dolphin RWiN's NKit reconstruction / playable d2x repair export path was placed on the physical USB flash drive used with a real Nintendo Wii. The title launched through USB Loader GX using the d2x cIOS setup and worked successfully on the physical Wii.
 
