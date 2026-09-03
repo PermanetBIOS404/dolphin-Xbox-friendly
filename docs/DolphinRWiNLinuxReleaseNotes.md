@@ -1,8 +1,6 @@
 # Dolphin RWiN — Linux Release
 
-> **Release status:** The GitHub-built Linux release candidate has completed packaging, release audit, and target-laptop portability smoke testing. GitHub release publication is still pending.
-
-> Draft release notes. No public release has been published yet.
+> **Release status:** This Linux release has completed packaging, release audit, target-laptop portability smoke testing, and physical-Wii acceptance testing for the documented SP2E01 workflow.
 
 Dolphin RWiN is a fork of Dolphin Emulator. This first packaging target for the current Dolphin RWiN generation focuses on a portable Linux build and the Wii development and real-hardware workflows added by the fork.
 
@@ -69,13 +67,13 @@ This validates the tested chain end-to-end: NKit source -> Dolphin RWiN reconstr
 
 ## Download
 
-Planned portable archive:
+Portable archive:
 
 ```text
 Dolphin-RWiN-Linux-Portable.tar.gz
 ```
 
-The archive URL will be added only when the tested artifact is published.
+Verify the archive with the accompanying `Dolphin-RWiN-Linux-Portable.tar.gz.sha256` checksum file.
 
 ## Upstream / License
 
