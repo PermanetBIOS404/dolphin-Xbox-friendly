@@ -63,7 +63,9 @@ On the target laptop:
 - existing standard Dolphin configuration and profile data continued to work; and
 - the separate Dolphin RWiN VirtualWii profile remained untouched.
 
-Real-Wii acceptance through USB Loader GX with d2x cIOS is still pending and is not claimed by this release draft.
+Physical-Wii acceptance through USB Loader GX with d2x cIOS has now passed for the tested title, Wii Sports + Wii Sports Resort (SP2E01). The WBFS produced by Dolphin RWiN's NKit reconstruction / playable d2x repair export path was placed on the physical USB flash drive used with a real Nintendo Wii. The title launched through USB Loader GX using the d2x cIOS setup and worked successfully on the physical Wii.
+
+This validates the tested chain end-to-end: NKit source -> Dolphin RWiN reconstruction/repair -> WBFS export -> physical USB storage -> USB Loader GX + d2x -> real Wii execution. This is a single-title acceptance result, not a guarantee of universal compatibility across every NKit title, Wii game, cIOS revision, or USB device.
 
 ## Download
 
